@@ -1,0 +1,53 @@
+schema_version: "0.2"
+system_id: adapted-multi-agent-coding
+workflow_id: sequential-plan-build-review
+
+stages:
+  - stage_id: planning
+    role: planner
+    instructions: >
+      Read the task and local agent rules. Produce plan.md covering architecture,
+      all requirements, dependencies, deterministic tests, and edge cases. Do not
+      implement code.
+
+  - stage_id: implementation
+    role: implementer
+    depends_on_stages:
+      - planning
+    instructions: >
+      Read the task, local agent rules, and plan.md. Create a complete self-contained
+      solution.py with deterministic executable tests. Run python3 solution.py and
+      repair failures. Write implementation.md containing the exact command and result.
+
+  - stage_id: review
+    role: reviewer
+    depends_on_stages:
+      - implementation
+    instructions: >
+      Read the task, local agent rules, plan.md, solution.py, and implementation.md.
+      Check all requirements and edge cases. Run python3 solution.py. Repair solution.py
+      when needed, add reviewer tests where useful, rerun verification, and write
+      review.md containing exact results.
+
+completion:
+  stage: review
+  requirement: All required workflow outputs exist and current verification succeeds.
+
+verification_policy:
+  automatically_allowed:
+    - command: python3 --version
+      purpose: environment capability check
+    - command: python3 solution.py
+      purpose: required executable verification
+  require_explicit_approval_for_unlisted_commands: true
+
+memory_hooks:
+  - after_planning
+  - before_implementation
+  - after_implementation
+  - before_implementation_finalization
+  - before_review
+  - after_review
+  - before_review_finalization
+  - before_workflow_completion
+

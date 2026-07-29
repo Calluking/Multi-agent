@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
+.env.*
+*.log
+*.exit
+*.stderr
+*.stdout
+*.stdout.json
+runs/
+memory_batch_*/
+batch_*/
+openclaw-workspace-state.json
+.DS_Store
