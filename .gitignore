@@ -14,6 +14,7 @@ memory_events.jsonl
 memory_errors.jsonl
 runs/
 runs_*/
+experiments/
 contract_extractions/
 memory_batch_*/
 batch_*/

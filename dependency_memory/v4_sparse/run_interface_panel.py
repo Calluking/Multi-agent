@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the X1 shared-interface-memory MultiAgentBench experiment."""
+"""Run shared-interface-memory MultiAgentBench development experiments."""
 
 from __future__ import annotations
 
@@ -15,7 +15,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from interface_memory import compact_view, load_or_empty, save_bank, summarize_audit
+from interface_memory import (compact_view, coverage_summary, load_or_empty, render_patterns,
+                              retrieve_patterns, save_bank, summarize_audit)
 from sparse_memory import append_event, fail_open_observe, observe_blocker, recovery_prompt
 
 
@@ -30,9 +31,31 @@ Treat TASK.md as the sole product specification. Do not use MARBLE, MARBLE profi
 MARBLE actions, or previous task results. Work in files, use Python's standard library,
 keep behavior deterministic, and never claim tests passed without running them.
 """
-PLANNER_PROMPT = """Act as planner. Read TASK.md and AGENTS.md. Write plan.md covering architecture, every requirement, dependencies, deterministic tests, and edge cases. Also create interface_memory.json as valid JSON with this shape: {\"interfaces\": [{\"interface_id\": \"short_id\", \"producer\": \"domain/component\", \"consumer\": \"domain/component\", \"purpose\": \"why data or behavior crosses this boundary\", \"fields\": [{\"name\": \"field\", \"type\": \"type\", \"meaning\": \"semantic meaning\"}], \"producer_obligations\": [\"concrete obligation\"], \"consumer_obligations\": [\"concrete obligation\"], \"invariants\": [\"property spanning both sides\"], \"boundary_test\": {\"setup\": \"state in producer\", \"action\": \"real crossing\", \"expected\": \"observable consumer result\"}}]}. Include only the 1-3 most important technical boundaries. Use an empty interfaces list only if the task genuinely has no cross-domain boundary. Do not implement code. Keep chat under five lines."""
+BOUNDARY_EXTRACTOR_PROMPT = """Act as a task-level interface-memory generator. Read only TASK.md and AGENTS.md. Create interface_memory.json as valid JSON with this shape: {\"interfaces\": [{\"interface_id\": \"short_id\", \"producer\": \"required domain/technology\", \"consumer\": \"required domain/technology\", \"task_evidence\": \"short exact requirement from TASK.md\", \"risk\": 1, \"purpose\": \"why behavior must cross\", \"fields\": [{\"name\": \"field\", \"type\": \"type\", \"meaning\": \"semantic meaning\"}], \"producer_obligations\": [\"concrete obligation\"], \"consumer_obligations\": [\"concrete obligation\"], \"invariants\": [\"property spanning both sides\"], \"boundary_test\": {\"setup\": \"state in producer\", \"action\": \"real crossing\", \"expected\": \"observable consumer result\"}}]}. Select at most three boundaries explicitly required by the official task. Rank risk 5 highest. Prefer required frontend/backend, external data/service, real-time/event, ML/application, NLP/application, cross-user authorization, and multi-party state boundaries. Do not select generic CLI dispatch, database CRUD, constructors, or internal registration merely because they are easy to test. Do not design implementation details or write plan.md. Keep chat under three lines."""
+PLANNER_PROMPT = """Act as planner. Read TASK.md, AGENTS.md, and interface_memory.json. Write plan.md covering architecture, every requirement, dependencies, deterministic tests, and edge cases. Treat the task-derived interface records as fixed acceptance requirements and bind each producer, consumer, invariant, and boundary test to concrete components. Do not replace required product boundaries with generic CLI/database substitutes. Do not modify interface_memory.json and do not implement code. Keep chat under five lines."""
+BASELINE_PLANNER_PROMPT = "Act as planner. Read TASK.md and AGENTS.md. Write plan.md covering architecture, every requirement, dependencies, deterministic tests, and edge cases. Do not implement code. Keep chat under five lines."
+X3_PLANNER_PROMPT = """Act as planner and task-level interface-memory generator. Read TASK.md and AGENTS.md. First create interface_memory.json using the exact JSON schema described below, then create plan.md that binds each record to concrete components and executable boundary tests. Cover architecture, every task requirement, dependencies, deterministic tests, and edge cases.
+
+Schema: {\"interfaces\": [{\"interface_id\": \"short_id\", \"producer\": \"required domain/technology\", \"consumer\": \"required domain/technology\", \"task_evidence\": \"short exact requirement from TASK.md\", \"risk\": 1, \"purpose\": \"why behavior must cross\", \"fields\": [{\"name\": \"field\", \"type\": \"type\", \"meaning\": \"semantic meaning\"}], \"producer_obligations\": [\"concrete obligation\"], \"consumer_obligations\": [\"concrete obligation\"], \"invariants\": [\"property spanning both sides\"], \"boundary_test\": {\"setup\": \"state in producer\", \"action\": \"real crossing\", \"expected\": \"observable consumer result\"}}]}.
+
+Select at most three boundaries explicitly required by the official task and rank risk 5 highest. Prefer required frontend/backend, external data/service, real-time/event, ML/application, NLP/application, cross-user authorization, and multi-party state boundaries. Do not select generic CLI dispatch, database CRUD, constructors, or internal registration merely because they are easy to test. Do not replace required product boundaries with generic substitutes. Do not implement code. Keep chat under five lines."""
+X4_PLANNER_PROMPT = X3_PLANNER_PROMPT.replace(
+    "Select at most three boundaries", "Select at most five boundaries"
+).replace(
+    "and multi-party state boundaries.",
+    "and multi-party state boundaries. Also select cross-requirement state propagation: data introduced in one "
+    "requirement that must constrain another capability, including availability, membership, occupancy, permissions, "
+    "feedback, and notifications. For requirements described as web, external, real-time, interactive media, email, "
+    "ML, or NLP, require an executable technical seam and reject data-only or hard-coded simulation as evidence.",
+)
 IMPLEMENTER_PROMPT = "Act as implementer. Read TASK.md, AGENTS.md, and plan.md. Create a complete self-contained solution.py with deterministic executable tests. Run python3 solution.py and fix failures. Write implementation.md with the exact command and result. Keep chat under five lines."
 REVIEWER_PROMPT = "Act as independent reviewer. Read TASK.md, AGENTS.md, plan.md, solution.py, and implementation.md. Check every requirement and edge case. Run python3 solution.py. Repair solution.py if needed, add reviewer tests where useful, rerun, and write review.md with exact results. Keep chat under five lines."
+INTEGRATION_PROMPT = """Act as a cross-domain integration specialist. Read TASK.md, plan.md, solution.py, implementation.md, and the shared interface memory appended below. Focus only on the detailed highest-risk contract. Exercise its real producer-to-consumer path with an executable boundary test. Reject placeholders and simulation-only seams when the task requires web, external data, real-time events, media, ML/NLP, authorization, or multi-party state propagation. Repair the smallest implementation gap, rerun python3 solution.py plus your boundary test, and write integration.md with exact evidence. Do not redesign unrelated features. Keep chat under five lines."""
+POSTHOC_INTEGRATION_PROMPT = """Act as an evidence-grounded cross-domain integration specialist. Read TASK.md, plan.md, solution.py, and implementation.md. Inspect the actual implementation and select exactly one highest-impact required producer-to-consumer boundary that is missing, incompatible, simulation-only, or semantically incomplete. Prefer frontend/backend, external data, real-time event, ML/NLP application, authorization, interactive media, or multi-party state propagation defects.
+
+Create interface_memory.json as valid JSON with exactly one interface record using this schema: {\"interfaces\": [{\"interface_id\": \"short_id\", \"producer\": \"actual component\", \"consumer\": \"actual component\", \"task_evidence\": \"requirement\", \"risk\": 5, \"purpose\": \"crossing\", \"fields\": [{\"name\": \"field\", \"type\": \"type\", \"meaning\": \"meaning\"}], \"producer_obligations\": [\"obligation\"], \"consumer_obligations\": [\"obligation\"], \"invariants\": [\"invariant\"], \"boundary_test\": {\"setup\": \"setup\", \"action\": \"real crossing\", \"expected\": \"observable result\"}}]}.
+
+Then repair that one boundary, execute its real end-to-end test plus python3 solution.py, and write integration.md with exact before/after evidence. Do not broaden scope or rewrite working unrelated code. Keep chat under five lines."""
 JUDGE_PROMPT = "Read TASK.md and solution.py when present. Score strictly: instruction_following, executability, consistency, quality, each integer 1-5. Deduct for every missing or partial requirement. Do not modify files. Output only one JSON object with those four keys."
 
 
@@ -177,11 +200,33 @@ def run_one(root: Path, item: dict[str, Any], condition: str, repetition: int) -
     agent_id = f"mab-sparse-{condition.lower()}-t{task_id:02d}-r{repetition}-{uuid.uuid4().hex[:6]}"
     ensure_agent(agent_id, workspace)
 
-    planner, planner_error = safe_call(workspace, agent_id, run_id + "-planner", PLANNER_PROMPT, "planner")
     bank_path = workspace / "interface_memory.json"
+    extractor = None
+    extractor_error = None
+    if condition == "X2":
+        extractor, extractor_error = safe_call(workspace, agent_id, run_id + "-interface-generator",
+                                                BOUNDARY_EXTRACTOR_PROMPT, "interface_generator")
+        bank = load_or_empty(bank_path, task_id, run_id)
+        save_bank(bank_path, bank)
+        planner_prompt = PLANNER_PROMPT
+    else:
+        planner_prompt = (BASELINE_PLANNER_PROMPT if condition == "X8" else
+                          X4_PLANNER_PROMPT if condition in {"X4", "X6"} else X3_PLANNER_PROMPT)
+        if condition == "X7":
+            planner_prompt += "\n\n" + render_patterns(retrieve_patterns(item["task"]["content"]))
+    planner, planner_error = safe_call(workspace, agent_id, run_id + "-planner", planner_prompt, "planner")
     bank = load_or_empty(bank_path, task_id, run_id)
     save_bank(bank_path, bank)
-    implementation_memory = compact_view(bank, "implementer")
+    inventory = coverage_summary(bank)
+    implementation_memory = (
+        "\n\n".join(x for x in (inventory, compact_view(bank, "implementer", limit=2)) if x)
+        if condition == "X4" else compact_view(bank, "implementer", limit=1)
+    )
+    if condition == "X8":
+        implementation_memory = ""
+    selected_patterns = retrieve_patterns(item["task"]["content"])
+    if condition == "X7":
+        implementation_memory = "\n\n".join(x for x in (render_patterns(selected_patterns), implementation_memory) if x)
     implementer_prompt = IMPLEMENTER_PROMPT + (("\n\n" + implementation_memory) if implementation_memory else "")
     (workspace / "implementer_interface_memory.txt").write_text(implementation_memory, encoding="utf-8")
     implementer1, impl_error = safe_call(workspace, agent_id, run_id + "-implementer", implementer_prompt, "implementer_pass1")
@@ -196,7 +241,7 @@ def run_one(root: Path, item: dict[str, Any], condition: str, repetition: int) -
     impl_recovery_text = ""
     if impl_blocker:
         try:
-            impl_recovery_text = recovery_prompt(impl_blocker, "M3" if condition == "X1" else condition)
+            impl_recovery_text = recovery_prompt(impl_blocker, "M3" if condition in {"X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8"} else condition)
         except Exception as exc:
             impl_recovery_text = recovery_prompt(impl_blocker, "C0")
             try:
@@ -211,9 +256,33 @@ def run_one(root: Path, item: dict[str, Any], condition: str, repetition: int) -
 
     scaffold_origin = bool(impl_blocker and impl_blocker.blocker_type == "artifact_missing" and implementer2)
 
+    integration = None
+    integration_error = None
+    if condition == "X6" and (workspace / "solution.py").is_file():
+        integration_memory = compact_view(bank, "reviewer", limit=1)
+        integration_prompt = INTEGRATION_PROMPT + (("\n\n" + integration_memory) if integration_memory else "")
+        (workspace / "integration_interface_memory.txt").write_text(integration_memory, encoding="utf-8")
+        integration, integration_error = safe_call(workspace, agent_id, run_id + "-integration",
+                                                     integration_prompt, "integration")
+    elif condition == "X8" and (workspace / "solution.py").is_file():
+        integration, integration_error = safe_call(workspace, agent_id, run_id + "-integration",
+                                                     POSTHOC_INTEGRATION_PROMPT, "integration")
+        bank = load_or_empty(bank_path, task_id, run_id)
+        save_bank(bank_path, bank)
+
     # Reviewer first pass is deliberately identical in C0 and M1 and always runs.
-    review_memory = compact_view(bank, "reviewer")
-    audit_instruction = """\n\nCreate interface_audit.json as valid JSON: {\"interfaces\": [{\"interface_id\": \"exact ID from memory\", \"passed\": true, \"evidence\": [\"exact test/observation\"], \"blocker\": null}]}. Do not mark a boundary passed from class names or isolated unit tests; exercise its real producer-to-consumer path."""
+    review_memory = (
+        "\n\n".join(x for x in (inventory, compact_view(bank, "reviewer", limit=3)) if x)
+        if condition == "X4" else compact_view(bank, "reviewer", limit=3)
+    )
+    if condition == "X7":
+        review_memory = "\n\n".join(x for x in (render_patterns(selected_patterns), review_memory) if x)
+    strict_audit_instruction = """\n\nCROSS-DOMAIN COVERAGE AND FIDELITY GATE
+Reread every TASK.md requirement before approving. Identify required domain/technology crossings omitted from interface memory, and repair material omissions. A class name, hard-coded table, data-only placeholder, function that always returns None, manual call labeled real-time, or isolated unit test is not sufficient integration evidence. For multi-user behavior, verify state propagation for every affected participant, not only the owner.
+
+Create interface_audit.json as valid JSON: {\"interfaces\": [{\"interface_id\": \"exact ID from memory\", \"passed\": true, \"evidence\": [\"exact test/observation\"], \"blocker\": null}], \"uncovered_task_boundaries\": [{\"task_evidence\": \"requirement\", \"status\": \"repaired or failed\", \"evidence\": \"exact observation\"}]}. Do not mark a boundary passed from class names or isolated unit tests; exercise its real producer-to-consumer path."""
+    basic_audit_instruction = """\n\nCreate interface_audit.json as valid JSON: {\"interfaces\": [{\"interface_id\": \"exact ID from memory\", \"passed\": true, \"evidence\": [\"exact test/observation\"], \"blocker\": null}]}. Do not mark a boundary passed from class names or isolated unit tests; exercise its real producer-to-consumer path."""
+    audit_instruction = strict_audit_instruction if condition in {"X4", "X5"} else basic_audit_instruction
     reviewer_prompt = REVIEWER_PROMPT + (("\n\n" + review_memory + audit_instruction) if review_memory else "")
     (workspace / "reviewer_interface_memory.txt").write_text(review_memory, encoding="utf-8")
     reviewer1, review_error = safe_call(workspace, agent_id, run_id + "-reviewer", reviewer_prompt, "reviewer_pass1")
@@ -229,7 +298,7 @@ def run_one(root: Path, item: dict[str, Any], condition: str, repetition: int) -
     review_recovery_text = ""
     if review_blocker:
         try:
-            review_recovery_text = recovery_prompt(review_blocker, "M3" if condition == "X1" else condition)
+            review_recovery_text = recovery_prompt(review_blocker, "M3" if condition in {"X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8"} else condition)
         except Exception as exc:
             review_recovery_text = recovery_prompt(review_blocker, "C0")
             try:
@@ -264,15 +333,16 @@ def run_one(root: Path, item: dict[str, Any], condition: str, repetition: int) -
                      "reviewer": review_blocker.to_dict() if review_blocker else None},
         "recovery_calls": {"implementer": implementer2 is not None, "reviewer": reviewer2 is not None},
         "interface_memory": interface_summary,
+        "interface_patterns": [item["id"] for item in selected_patterns] if condition == "X7" else [],
         "injection": {"implementer_chars": len(impl_recovery_text),
                       "reviewer_chars": len(review_recovery_text),
                       "total_chars": len(impl_recovery_text) + len(review_recovery_text)},
-        "stage_meta": {"planner": stage_meta(planner), "implementer_pass1": stage_meta(implementer1),
-                       "implementer_recovery": stage_meta(implementer2), "reviewer_pass1": stage_meta(reviewer1),
-                       "reviewer_recovery": stage_meta(reviewer2), "judge": stage_meta(judge)},
+        "stage_meta": {"interface_generator": stage_meta(extractor), "planner": stage_meta(planner), "implementer_pass1": stage_meta(implementer1),
+                       "implementer_recovery": stage_meta(implementer2), "integration": stage_meta(integration),
+                       "reviewer_pass1": stage_meta(reviewer1), "reviewer_recovery": stage_meta(reviewer2), "judge": stage_meta(judge)},
         "wall_time_seconds": time.time() - run_started,
-        "stage_errors": {"planner": planner_error, "implementer": impl_error,
-                         "reviewer": review_error, "judge": judge_error},
+        "stage_errors": {"interface_generator": extractor_error, "planner": planner_error, "implementer": impl_error,
+                         "integration": integration_error, "reviewer": review_error, "judge": judge_error},
         "input_hashes": hashes,
     }
     (workspace / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
@@ -283,7 +353,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tasks", default=",".join(map(str, DEFAULT_PANEL)), help="e.g. 1,2,5,15,17 or 1-5")
     parser.add_argument("--repetitions", type=int, default=1)
-    parser.add_argument("--condition", choices=("C0", "X1"), default="X1")
+    parser.add_argument("--condition", choices=("C0", "X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8"), default="X8")
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     args = parser.parse_args()
     root = args.root.expanduser().resolve()
