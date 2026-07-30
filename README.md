@@ -1,38 +1,36 @@
 # Multi-agent Dependency Memory
 
-This repository contains the reproducible milestone from a 20-task MultiAgentBench coding study:
+This repository contains the baseline runner, trace-to-MultiAgentBench score converter, and the private dependency-memory prototypes developed for MultiAgentBench coding tasks.
 
-- a clean OpenClaw baseline runner;
-- a private dependency-memory implementation;
-- automatic dependency-contract extraction and validation;
-- a memory-enabled batch runner with read/observe/update/readiness checkpoints;
-- unit tests, a worked Task 19 example, and compact evaluation summaries.
+## What the memory system does
 
-The adapted workflow is intended for mechanism research. Its scores are descriptive and are not directly comparable with the official MultiAgentBench leaderboard.
+The current sparse design treats memory as an event-grounded recovery layer:
+
+1. Run the normal planner, implementer, and reviewer workflow.
+2. Observe persistent workspace evidence after an agent turn: required files, compilation, execution, and handoff reports.
+3. If a dependency is unresolved, store **one current blocker** with its expected state, observed state, evidence, recipient role, priority, and recovery target.
+4. Retrieve that private record for the responsible Agent and inject a bounded recovery instruction.
+5. Re-run verification. If the memory layer fails, fail open and continue the baseline workflow.
+
+This avoids the earlier v3 design's large task-wide dependency graphs, which added noise and caused regressions.
 
 ## Repository layout
 
-```text
-baseline/             Portable baseline coding-task runner
-dependency_memory/    Contract extraction, YAML memory store, and memory runner
-tests/                Unit tests for extraction and state management
-examples/task19/      Example task, workflow, contracts, and compiled memory
-docs/                 Design decisions, fault tables, and evaluation notes
-results/              Compact baseline and memory-run summaries
-```
+- `baseline/`: clean OpenClaw baseline runner and MultiAgentBench trace scoring adapter.
+- `dependency_memory/`: the generated-contract implementation retained for ablation.
+- `dependency_memory/v4_sparse/`: sparse blocker observation, recovery prompting, matched-condition runner, evaluator, and tests.
+- `examples/task19/`: worked task, workflow, contracts, and compiled memory.
+- `docs/`: design notes, fault audit, case studies, and evaluation reports.
 
 ## Requirements
 
 - Python 3.11+
-- OpenClaw CLI available as `openclaw`
-- MultiAgentBench coding dataset (`coding_main.jsonl`)
-- An OpenClaw model/provider configured in the environment
+- OpenClaw available as `openclaw`
+- MultiAgentBench checked out locally
+- `PyYAML` and `pytest`
+- an OpenClaw-compatible model/API configuration
 
-Install the Python dependency:
-
-```bash
-python3 -m pip install -r requirements.txt
-```
+The v4 experiment runner's default dataset and model reflect the original WSL experiment. Override them for a different installation. The baseline runner exposes these values as CLI options.
 
 ## Run the baseline
 
@@ -44,50 +42,35 @@ python3 baseline/run_batch.py \
   --start 1 --end 20
 ```
 
-The runner executes planner, implementer, reviewer, and adapted scoring stages and writes one workspace per task.
-
-## Run with private dependency memory
+## Run the sparse matched comparison
 
 ```bash
-PYTHONPATH=dependency_memory python3 dependency_memory/run_memory_batch.py \
-  --dataset /path/to/coding_main.jsonl \
-  --root runs/dependency-memory \
-  --model deepseek/deepseek-v4-flash \
-  --start 1 --end 20
+cd dependency_memory/v4_sparse
+python3 run_sparse_panel.py \
+  --tasks 1,2,5,15,17 \
+  --repetitions 3 \
+  --condition both \
+  --root ./runs_panel_v4
 ```
 
-For each task the memory-enabled runner:
-
-1. extracts dependency contracts from the task and workflow;
-2. compiles complete private YAML records;
-3. retrieves unresolved dependencies before an agent turn;
-4. injects the current target or blocker into the agent prompt;
-5. observes files, commands, and verification evidence after the turn;
-6. updates memory and gates handoff readiness;
-7. retries unresolved work before releasing the next agent.
-
-## Compile the included example
+## Quick checks
 
 ```bash
-PYTHONPATH=dependency_memory python3 dependency_memory/compile_contracts_file.py \
-  --contracts examples/task19/dependency_contracts.yaml \
-  --workflow examples/task19/workflow_input.yaml \
-  --workspace examples/task19 \
-  --output /tmp/task19-memory.yaml \
-  --task-id 19 \
-  --run-id example-task19
+python3 -m pip install -r requirements.txt
+PYTHONPATH=dependency_memory python3 -m pytest -q \
+  tests/test_dependency_memory.py \
+  tests/test_contract_extractor.py
+python3 -m pytest -q dependency_memory/v4_sparse/test_sparse_memory.py
+python3 dependency_memory/v4_sparse/run_sparse_panel.py --help
+python3 dependency_memory/v4_sparse/evaluate_v4.py --help
 ```
 
-## Tests
+## Evaluation status
 
-```bash
-PYTHONPATH=dependency_memory python3 -m unittest discover -s tests -v
-```
+The repository preserves both successful development observations and the held-out result. On the 15-task held-out comparison, M3 increased workflow completion from 73.3% to 86.7% and runnable artifacts from 86.7% to 93.3%, while mean Task Score changed from 85.00 to 84.33. The mechanism is therefore a useful dependency-recovery prototype, not yet a validated general performance improvement.
 
-## Main result
-
-Across the 20-task descriptive comparison, dependency faults fell from 8 to 2. Mean task score increased from 82.75 to 85.50, workflow completion from 70% to 90%, and runnable artifacts from 80% to 90%. See `docs/MEMORY_BATCH_V3_EVALUATION.md` and `docs/FAULT_TABLE.md` for the evaluation context and per-task analysis.
+See `docs/M3_HOLDOUT_RESULTS.md` and `docs/M3_DEVELOPMENT_RESULTS.md` for the complete tables and limitations.
 
 ## Security
 
-Do not commit provider keys, GitHub tokens, `.env` files, OpenClaw credentials, or raw agent workspaces. The included `.gitignore` excludes common generated and secret-bearing files.
+API keys are read from the local environment. No credentials, shell profiles, raw authentication files, or generated agent workspaces are included.
