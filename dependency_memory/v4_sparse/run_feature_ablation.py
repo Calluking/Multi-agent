@@ -24,6 +24,24 @@ FEATURES = {
 }
 
 
+def safe_stage_call(workspace: Path, *args: Any):
+    """Retry only transient provider saturation; preserve all other stage failures."""
+    envelope = None
+    error = None
+    for attempt in range(1, 4):
+        envelope, error = base.safe_call(workspace, *args)
+        if envelope is not None or not error:
+            return envelope, error
+        lowered = error.lower()
+        if "503" not in lowered and "too busy" not in lowered and "failovererror" not in lowered:
+            return envelope, error
+        with (workspace / "transient_retries.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"attempt": attempt, "error": error, "label": args[-1]}) + "\n")
+        if attempt < 3:
+            time.sleep(20 * attempt)
+    return envelope, error
+
+
 def observe_dependency(workspace: Path, *, enabled: bool, task_id: int, run_id: str,
                        role: str, stage: str, verification: dict[str, Any],
                        envelope: dict[str, Any] | None, scaffold_origin: bool = False):
@@ -50,7 +68,7 @@ def recover_dependency(workspace: Path, *, enabled: bool, blocker, agent_id: str
         return None, "", None
     prompt = recovery_prompt(blocker, "M3")
     (workspace / f"{label}_prompt.txt").write_text(prompt, encoding="utf-8")
-    envelope, error = base.safe_call(workspace, agent_id, session, prompt, label)
+    envelope, error = safe_stage_call(workspace, agent_id, session, prompt, label)
     return envelope, prompt, error
 
 
@@ -71,10 +89,10 @@ def run_one(root: Path, item: dict[str, Any], condition: str, repetition: int) -
 
     agent_id = f"mab-ablation-{condition}-t{task_id:02d}-{uuid.uuid4().hex[:6]}"
     base.ensure_agent(agent_id, workspace)
-    planner, planner_error = base.safe_call(
+    planner, planner_error = safe_stage_call(
         workspace, agent_id, run_id + "-planner", base.BASELINE_PLANNER_PROMPT, "planner"
     )
-    implementer1, impl_error = base.safe_call(
+    implementer1, impl_error = safe_stage_call(
         workspace, agent_id, run_id + "-implementer", base.IMPLEMENTER_PROMPT, "implementer_pass1"
     )
     impl_verification = base.verify_solution(workspace)
@@ -98,7 +116,7 @@ def run_one(root: Path, item: dict[str, Any], condition: str, repetition: int) -
     integration = None
     integration_error = None
     if features["codomain"] and (workspace / "solution.py").is_file():
-        integration, integration_error = base.safe_call(
+        integration, integration_error = safe_stage_call(
             workspace, agent_id, run_id + "-integration",
             base.POSTHOC_INTEGRATION_PROMPT, "codomain_integration",
         )
@@ -112,7 +130,7 @@ SHARED BOUNDARY AGREEMENT AUDIT
 For each shared interface-memory record, exercise the real producer-to-consumer path. Repair semantic mismatches. Create interface_audit.json as valid JSON: {"interfaces": [{"interface_id": "exact ID", "passed": true, "evidence": ["exact observation"], "blocker": null}]}. Do not infer success from class names or isolated unit tests."""
     reviewer_prompt = base.REVIEWER_PROMPT + (("\n\n" + review_memory + audit) if review_memory else "")
     (workspace / "reviewer_interface_memory.txt").write_text(review_memory, encoding="utf-8")
-    reviewer1, review_error = base.safe_call(
+    reviewer1, review_error = safe_stage_call(
         workspace, agent_id, run_id + "-reviewer", reviewer_prompt, "reviewer_pass1"
     )
     review_verification = base.verify_solution(workspace)
@@ -137,7 +155,7 @@ For each shared interface-memory record, exercise the real producer-to-consumer 
     if features["codomain"]:
         save_bank(bank_path, bank)
 
-    judge, judge_error = base.safe_call(
+    judge, judge_error = safe_stage_call(
         workspace, agent_id, run_id + "-judge", base.JUDGE_PROMPT, "task_score"
     )
     try:
