@@ -53,6 +53,25 @@ python3 run_sparse_panel.py \
   --root ./runs_panel_v4
 ```
 
+## Run the dependency × cross-domain ablation
+
+The feature runner exposes two independent switches through four named conditions:
+
+- `baseline`: neither mechanism
+- `dependency`: private sparse dependency recovery only
+- `codomain`: shared boundary memory and post-hoc integration only
+- `both`: both mechanisms
+
+Run all four on Task 1:
+
+```bash
+cd dependency_memory/v4_sparse
+python3 run_feature_ablation.py \
+  --tasks 1 \
+  --condition all \
+  --root ./runs_feature_ablation_task1
+```
+
 ## Quick checks
 
 ```bash
