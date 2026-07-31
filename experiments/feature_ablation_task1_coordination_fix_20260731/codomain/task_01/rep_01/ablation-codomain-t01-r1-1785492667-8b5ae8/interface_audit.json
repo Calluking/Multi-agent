@@ -1,0 +1,18 @@
+{
+  "interfaces": [
+    {
+      "interface_id": "translation_tool_to_exchange",
+      "passed": true,
+      "evidence": [
+        "python3 solution.py -> 11 passed, 0 failed (exit 0)",
+        "python3 reviewer_test.py -> 7 passed, 0 failed (exit 0)",
+        "Boundary test: clara+dario paired 'french'; send_exchange_message(pair, clara, 'hello') -> exchange_messages(pair)[0].delivered_text == 'bonjour' (live tool translation)",
+        "Non-member sender rejected with ValidationError; message recorded against pair with sender_id in member set",
+        "Empty message ('   ') rejected with ValidationError; unknown pair_id 999 rejected with NotFoundError",
+        "Determinism: translate('hello','es') returns 'hola' consistently; delivered_text never empty for non-empty original_text (fallback '[fr] zzz_nonexistent' non-empty)",
+        "Producer lang resolution: _EXCHANGE_LANG_TO_TOOL maps 'french'->'fr'; 'welcome'/'fr' -> 'bienvenue' via real exchange path"
+      ],
+      "blocker": null
+    }
+  ]
+}
