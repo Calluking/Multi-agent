@@ -15,6 +15,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from coordination_memory import (CONTRIBUTION_INSTRUCTION, ingest_audit,
+                                  ingest_contributions, initialize_pool, save_pool,
+                                  targeted_view)
 from interface_memory import (compact_view, coverage_summary, load_or_empty, render_patterns,
                               retrieve_patterns, save_bank, summarize_audit)
 from sparse_memory import append_event, fail_open_observe, observe_blocker, recovery_prompt
@@ -217,19 +220,29 @@ def run_one(root: Path, item: dict[str, Any], condition: str, repetition: int) -
     planner, planner_error = safe_call(workspace, agent_id, run_id + "-planner", planner_prompt, "planner")
     bank = load_or_empty(bank_path, task_id, run_id)
     save_bank(bank_path, bank)
+    pool_path = workspace / "coordination_memory.json"
+    pool_events = workspace / "coordination_memory_events.jsonl"
+    pool = initialize_pool(bank, task_id, run_id, actor="planner_agent")
+    save_pool(pool_path, pool)
     inventory = coverage_summary(bank)
     implementation_memory = (
-        "\n\n".join(x for x in (inventory, compact_view(bank, "implementer", limit=2)) if x)
-        if condition == "X4" else compact_view(bank, "implementer", limit=1)
+        "\n\n".join(x for x in (inventory, targeted_view(pool, actor="implementer_agent", limit=2)) if x)
+        if condition == "X4" else targeted_view(pool, actor="implementer_agent", limit=1)
     )
     if condition == "X8":
         implementation_memory = ""
     selected_patterns = retrieve_patterns(item["task"]["content"])
     if condition == "X7":
         implementation_memory = "\n\n".join(x for x in (render_patterns(selected_patterns), implementation_memory) if x)
-    implementer_prompt = IMPLEMENTER_PROMPT + (("\n\n" + implementation_memory) if implementation_memory else "")
+    implementer_prompt = IMPLEMENTER_PROMPT + (("\n\n" + implementation_memory + CONTRIBUTION_INSTRUCTION)
+                                                if implementation_memory else "")
     (workspace / "implementer_interface_memory.txt").write_text(implementation_memory, encoding="utf-8")
     implementer1, impl_error = safe_call(workspace, agent_id, run_id + "-implementer", implementer_prompt, "implementer_pass1")
+    implementer_contributions = ingest_contributions(
+        workspace / "coordination_contributions.json", pool,
+        actor="implementer_agent", event_log=pool_events,
+    )
+    save_pool(pool_path, pool)
     impl_verification = verify_solution(workspace)
     impl_blocker = fail_open_observe(
         observe_blocker, error_log=workspace / "memory_errors.jsonl", workspace=workspace,
@@ -259,8 +272,9 @@ def run_one(root: Path, item: dict[str, Any], condition: str, repetition: int) -
     integration = None
     integration_error = None
     if condition == "X6" and (workspace / "solution.py").is_file():
-        integration_memory = compact_view(bank, "reviewer", limit=1)
-        integration_prompt = INTEGRATION_PROMPT + (("\n\n" + integration_memory) if integration_memory else "")
+        integration_memory = targeted_view(pool, actor="integration_agent", limit=1)
+        integration_prompt = INTEGRATION_PROMPT + (("\n\n" + integration_memory + CONTRIBUTION_INSTRUCTION)
+                                                   if integration_memory else "")
         (workspace / "integration_interface_memory.txt").write_text(integration_memory, encoding="utf-8")
         integration, integration_error = safe_call(workspace, agent_id, run_id + "-integration",
                                                      integration_prompt, "integration")
@@ -269,11 +283,19 @@ def run_one(root: Path, item: dict[str, Any], condition: str, repetition: int) -
                                                      POSTHOC_INTEGRATION_PROMPT, "integration")
         bank = load_or_empty(bank_path, task_id, run_id)
         save_bank(bank_path, bank)
+        pool = initialize_pool(bank, task_id, run_id, actor="integration_agent")
+        save_pool(pool_path, pool)
+
+    integration_contributions = ingest_contributions(
+        workspace / "coordination_contributions.json", pool,
+        actor="integration_agent", event_log=pool_events,
+    ) if integration else {"submitted": 0, "applied": 0, "rejected": 0}
+    save_pool(pool_path, pool)
 
     # Reviewer first pass is deliberately identical in C0 and M1 and always runs.
     review_memory = (
-        "\n\n".join(x for x in (inventory, compact_view(bank, "reviewer", limit=3)) if x)
-        if condition == "X4" else compact_view(bank, "reviewer", limit=3)
+        "\n\n".join(x for x in (inventory, targeted_view(pool, actor="reviewer_agent", limit=3)) if x)
+        if condition == "X4" else targeted_view(pool, actor="reviewer_agent", limit=3)
     )
     if condition == "X7":
         review_memory = "\n\n".join(x for x in (render_patterns(selected_patterns), review_memory) if x)
@@ -283,9 +305,14 @@ Reread every TASK.md requirement before approving. Identify required domain/tech
 Create interface_audit.json as valid JSON: {\"interfaces\": [{\"interface_id\": \"exact ID from memory\", \"passed\": true, \"evidence\": [\"exact test/observation\"], \"blocker\": null}], \"uncovered_task_boundaries\": [{\"task_evidence\": \"requirement\", \"status\": \"repaired or failed\", \"evidence\": \"exact observation\"}]}. Do not mark a boundary passed from class names or isolated unit tests; exercise its real producer-to-consumer path."""
     basic_audit_instruction = """\n\nCreate interface_audit.json as valid JSON: {\"interfaces\": [{\"interface_id\": \"exact ID from memory\", \"passed\": true, \"evidence\": [\"exact test/observation\"], \"blocker\": null}]}. Do not mark a boundary passed from class names or isolated unit tests; exercise its real producer-to-consumer path."""
     audit_instruction = strict_audit_instruction if condition in {"X4", "X5"} else basic_audit_instruction
-    reviewer_prompt = REVIEWER_PROMPT + (("\n\n" + review_memory + audit_instruction) if review_memory else "")
+    reviewer_prompt = REVIEWER_PROMPT + (("\n\n" + review_memory + CONTRIBUTION_INSTRUCTION + audit_instruction)
+                                         if review_memory else "")
     (workspace / "reviewer_interface_memory.txt").write_text(review_memory, encoding="utf-8")
     reviewer1, review_error = safe_call(workspace, agent_id, run_id + "-reviewer", reviewer_prompt, "reviewer_pass1")
+    reviewer_contributions = ingest_contributions(
+        workspace / "coordination_contributions.json", pool,
+        actor="reviewer_agent", event_log=pool_events,
+    )
     review_verification = verify_solution(workspace)
     review_blocker = fail_open_observe(
         observe_blocker, error_log=workspace / "memory_errors.jsonl", workspace=workspace,
@@ -312,6 +339,11 @@ Create interface_audit.json as valid JSON: {\"interfaces\": [{\"interface_id\": 
         review_verification = verify_solution(workspace)
 
     interface_summary = summarize_audit(workspace / "interface_audit.json", bank)
+    audit_contributions = ingest_audit(
+        workspace / "interface_audit.json", pool,
+        actor="reviewer_agent", event_log=pool_events,
+    )
+    save_pool(pool_path, pool)
     save_bank(bank_path, bank)
 
     judge, judge_error = safe_call(workspace, agent_id, run_id + "-judge", JUDGE_PROMPT, "task_score")
@@ -333,6 +365,15 @@ Create interface_audit.json as valid JSON: {\"interfaces\": [{\"interface_id\": 
                      "reviewer": review_blocker.to_dict() if review_blocker else None},
         "recovery_calls": {"implementer": implementer2 is not None, "reviewer": reviewer2 is not None},
         "interface_memory": interface_summary,
+        "coordination_memory": {
+            "records": len(pool.get("records", [])),
+            "implementer_contributions": implementer_contributions,
+            "integration_contributions": integration_contributions,
+            "reviewer_contributions": reviewer_contributions,
+            "audit_contributions": audit_contributions,
+            "open_challenges": sum(1 for record in pool.get("records", [])
+                for challenge in record.get("open_challenges", []) if challenge.get("status") == "open"),
+        },
         "interface_patterns": [item["id"] for item in selected_patterns] if condition == "X7" else [],
         "injection": {"implementer_chars": len(impl_recovery_text),
                       "reviewer_chars": len(review_recovery_text),

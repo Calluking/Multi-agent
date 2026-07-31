@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Any
 
 import run_interface_panel as base
+from coordination_memory import (CONTRIBUTION_INSTRUCTION, ingest_audit,
+                                  ingest_contributions, initialize_pool, load_pool,
+                                  save_pool, targeted_view)
 from interface_memory import compact_view, load_or_empty, save_bank, summarize_audit
 from sparse_memory import append_event, fail_open_observe, observe_blocker, recovery_prompt
 
@@ -123,16 +126,27 @@ def run_one(root: Path, item: dict[str, Any], condition: str, repetition: int) -
     bank = load_or_empty(bank_path, task_id, run_id)
     if features["codomain"]:
         save_bank(bank_path, bank)
-    review_memory = compact_view(bank, "reviewer", limit=3) if features["codomain"] else ""
+    pool_path = workspace / "coordination_memory.json"
+    pool_events = workspace / "coordination_memory_events.jsonl"
+    pool = load_pool(pool_path, task_id, run_id)
+    if features["codomain"] and not pool.get("records"):
+        pool = initialize_pool(bank, task_id, run_id, actor="integration_agent")
+        save_pool(pool_path, pool)
+    review_memory = targeted_view(pool, actor="reviewer_agent", limit=3) if features["codomain"] else ""
     audit = """
 
 SHARED BOUNDARY AGREEMENT AUDIT
 For each shared interface-memory record, exercise the real producer-to-consumer path. Repair semantic mismatches. Create interface_audit.json as valid JSON: {"interfaces": [{"interface_id": "exact ID", "passed": true, "evidence": ["exact observation"], "blocker": null}]}. Do not infer success from class names or isolated unit tests."""
-    reviewer_prompt = base.REVIEWER_PROMPT + (("\n\n" + review_memory + audit) if review_memory else "")
+    reviewer_prompt = base.REVIEWER_PROMPT + (("\n\n" + review_memory + CONTRIBUTION_INSTRUCTION + audit)
+                                               if review_memory else "")
     (workspace / "reviewer_interface_memory.txt").write_text(review_memory, encoding="utf-8")
     reviewer1, review_error = safe_stage_call(
         workspace, agent_id, run_id + "-reviewer", reviewer_prompt, "reviewer_pass1"
     )
+    contribution_summary = (ingest_contributions(
+        workspace / "coordination_contributions.json", pool,
+        actor="reviewer_agent", event_log=pool_events,
+    ) if features["codomain"] else {"submitted": 0, "applied": 0, "rejected": 0})
     review_verification = base.verify_solution(workspace)
     review_blocker = observe_dependency(
         workspace, enabled=features["dependency"], task_id=task_id, run_id=run_id,
@@ -153,7 +167,14 @@ For each shared interface-memory record, exercise the real producer-to-consumer 
         "records": 0, "verified": 0, "failed": 0
     }
     if features["codomain"]:
+        audit_contributions = ingest_audit(
+            workspace / "interface_audit.json", pool,
+            actor="reviewer_agent", event_log=pool_events,
+        )
+        save_pool(pool_path, pool)
         save_bank(bank_path, bank)
+    else:
+        audit_contributions = {"submitted": 0, "applied": 0, "rejected": 0}
 
     judge, judge_error = safe_stage_call(
         workspace, agent_id, run_id + "-judge", base.JUDGE_PROMPT, "task_score"
@@ -180,7 +201,13 @@ For each shared interface-memory record, exercise the real producer-to-consumer 
             "injected_chars": len(impl_recovery_text) + len(review_recovery_text),
         },
         "codomain_memory": {**interface_summary, "integration_called": integration is not None,
-                            "review_injected_chars": len(review_memory)},
+                            "review_injected_chars": len(review_memory),
+                            "coordination_records": len(pool.get("records", [])),
+                            "agent_contributions": contribution_summary,
+                            "audit_contributions": audit_contributions,
+                            "open_challenges": sum(1 for record in pool.get("records", [])
+                                for challenge in record.get("open_challenges", [])
+                                if challenge.get("status") == "open")},
         "stage_meta": {
             "planner": base.stage_meta(planner), "implementer_pass1": base.stage_meta(implementer1),
             "implementer_recovery": base.stage_meta(implementer2), "codomain_integration": base.stage_meta(integration),

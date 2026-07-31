@@ -1,0 +1,58 @@
+import json
+
+from coordination_memory import (apply_event, ingest_audit, ingest_contributions,
+                                  initialize_pool, load_pool, save_pool, targeted_view)
+from interface_memory import normalize_bank
+
+
+def bank():
+    raw = {"interfaces": [{"interface_id": "a_to_b", "producer": "Agent A",
+        "consumer": "Agent B", "purpose": "share a typed result", "task_evidence": "A feeds B",
+        "risk": 5, "fields": [{"name": "value", "type": "int", "meaning": "score"}],
+        "producer_obligations": ["emit value"], "consumer_obligations": ["validate value"],
+        "invariants": ["value is non-negative"],
+        "boundary_test": {"setup": "A has 1", "action": "B reads", "expected": "B sees 1"}}]}
+    return normalize_bank(raw, 1, "run")
+
+
+def test_proposal_challenge_revision_accept_and_verify(tmp_path):
+    pool = initialize_pool(bank(), 1, "run")
+    record = pool["records"][0]
+    assert record["version"] == 1 and record["status"] == "proposed"
+    assert apply_event(pool, {"memory_id": "interface:a_to_b", "action": "challenge",
+        "claim": "consumer also needs a label"}, default_actor="agent_b")
+    assert record["status"] == "challenged"
+    assert apply_event(pool, {"memory_id": "interface:a_to_b", "action": "revision",
+        "base_version": 1, "patch": {"fields": [{"name": "value", "type": "int"},
+        {"name": "label", "type": "str"}]}}, default_actor="agent_a")
+    assert record["version"] == 2 and record["status"] == "revised"
+    assert apply_event(pool, {"memory_id": "interface:a_to_b", "action": "accept",
+        "base_version": 2}, default_actor="agent_b")
+    assert record["status"] == "agreed"
+    audit = tmp_path / "interface_audit.json"
+    audit.write_text(json.dumps({"interfaces": [{"interface_id": "a_to_b", "passed": True,
+        "evidence": ["real crossing passed"], "blocker": None}]}))
+    assert ingest_audit(audit, pool)["applied"] == 1
+    assert record["status"] == "verified"
+    assert record["verification"]["evidence"] == ["real crossing passed"]
+
+
+def test_stale_revision_is_rejected():
+    pool = initialize_pool(bank(), 1, "run")
+    assert not apply_event(pool, {"memory_id": "interface:a_to_b", "action": "revision",
+        "base_version": 0, "patch": {"purpose": "stale"}}, default_actor="agent_a")
+    assert pool["records"][0]["version"] == 1
+
+
+def test_agent_contribution_file_and_targeted_projection(tmp_path):
+    pool = initialize_pool(bank(), 1, "run")
+    contribution = tmp_path / "coordination_contributions.json"
+    contribution.write_text(json.dumps({"contributions": [{"memory_id": "interface:a_to_b",
+        "action": "challenge", "claim": "type mismatch"}]}))
+    result = ingest_contributions(contribution, pool, actor="implementer_agent")
+    assert result == {"submitted": 1, "applied": 1, "rejected": 0}
+    view = targeted_view(pool, actor="reviewer_agent")
+    assert "type mismatch" in view and "superseded history" in view
+    path = tmp_path / "coordination_memory.json"
+    save_pool(path, pool)
+    assert load_pool(path, 1, "run")["records"][0]["status"] == "challenged"
