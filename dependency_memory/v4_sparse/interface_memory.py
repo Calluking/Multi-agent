@@ -166,7 +166,10 @@ def summarize_audit(path: Path, bank: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         raw = {}
     results = raw.get("interfaces", []) if isinstance(raw, dict) else []
-    by_id = {str(x.get("interface_id")): x for x in results if isinstance(x, dict)}
+    def base_id(value: Any) -> str:
+        text = str(value)
+        return text.split("interface:", 1)[1] if text.startswith("interface:") else text
+    by_id = {base_id(x.get("interface_id")): x for x in results if isinstance(x, dict)}
     passed = failed = 0
     for item in bank.get("interfaces", []):
         result = by_id.get(item["interface_id"], {})

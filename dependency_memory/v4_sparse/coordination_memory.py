@@ -222,8 +222,10 @@ def ingest_audit(path: Path, pool: dict[str, Any], *, actor: str = "reviewer_age
     for item in raw.get("interfaces", []) if isinstance(raw, dict) else []:
         if not isinstance(item, dict) or not item.get("interface_id"):
             continue
+        audit_id = str(item["interface_id"])
+        memory_id = audit_id if audit_id.startswith("interface:") else f"interface:{audit_id}"
         contributions.append({
-            "memory_id": f"interface:{item['interface_id']}",
+            "memory_id": memory_id,
             "action": "verification", "passed": item.get("passed") is True,
             "evidence": item.get("evidence", []), "blocker": item.get("blocker"),
             "claim": "Boundary audit result",
@@ -251,7 +253,8 @@ def targeted_view(pool: dict[str, Any], *, actor: str, limit: int = 3) -> str:
     for record in records[:limit]:
         contract = record.get("resolved", {})
         lines += [
-            f"\n[{record['memory_id']}] version={record.get('version')} status={record.get('status')}",
+            f"\n[interface_id={contract.get('interface_id')}; memory_id={record['memory_id']}] "
+            f"version={record.get('version')} status={record.get('status')}",
             f"{contract.get('producer')} -> {contract.get('consumer')}: {contract.get('purpose')}",
             "Producer must: " + "; ".join(contract.get("producer_obligations", [])),
             "Consumer must: " + "; ".join(contract.get("consumer_obligations", [])),

@@ -56,3 +56,12 @@ def test_agent_contribution_file_and_targeted_projection(tmp_path):
     path = tmp_path / "coordination_memory.json"
     save_pool(path, pool)
     assert load_pool(path, 1, "run")["records"][0]["status"] == "challenged"
+
+
+def test_audit_accepts_pool_prefixed_memory_id(tmp_path):
+    pool = initialize_pool(bank(), 1, "run")
+    audit = tmp_path / "interface_audit.json"
+    audit.write_text(json.dumps({"interfaces": [{"interface_id": "interface:a_to_b",
+        "passed": True, "evidence": ["passed"], "blocker": None}]}))
+    assert ingest_audit(audit, pool) == {"submitted": 1, "applied": 1, "rejected": 0}
+    assert pool["records"][0]["verification"]["state"] == "verified"

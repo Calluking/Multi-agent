@@ -41,6 +41,14 @@ def test_audit_updates_state(tmp_path):
     assert bank["interfaces"][0]["runtime"]["blocker"] == "owner-only update"
 
 
+def test_audit_accepts_coordination_memory_prefix(tmp_path):
+    bank = normalize_bank(sample(), 3, "run")
+    audit = tmp_path / "interface_audit.json"
+    audit.write_text(json.dumps({"interfaces": [{"interface_id": "interface:team_calendar",
+        "passed": True, "evidence": ["crossing passed"], "blocker": None}]}))
+    assert summarize_audit(audit, bank)["verified"] == 1
+
+
 def test_public_pattern_retrieval_is_deterministic():
     patterns = retrieve_patterns("A real-time collaborative web app uses availability for all team members")
     ids = [item["id"] for item in patterns]
