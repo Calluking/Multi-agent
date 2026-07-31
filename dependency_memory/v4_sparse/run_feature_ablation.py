@@ -163,6 +163,46 @@ For each shared interface-memory record, exercise the real producer-to-consumer 
     if reviewer2:
         review_verification = base.verify_solution(workspace)
 
+    # In codomain-only runs an incomplete implementer may leave no artifact for
+    # the pre-review integration hook, while the reviewer subsequently creates
+    # or repairs solution.py.  Do not permanently miss the memory mechanism:
+    # initialize it at the first later point where a real artifact exists, then
+    # run a second boundary-aware review to produce current audit evidence.
+    late_integration = None
+    late_integration_error = None
+    late_reviewer = None
+    late_reviewer_error = None
+    if (features["codomain"] and integration is None
+            and (workspace / "solution.py").is_file()):
+        late_integration, late_integration_error = safe_stage_call(
+            workspace, agent_id, run_id + "-late-integration",
+            base.POSTHOC_INTEGRATION_PROMPT, "codomain_late_integration",
+        )
+        if late_integration is not None:
+            integration = late_integration
+            bank = load_or_empty(bank_path, task_id, run_id)
+            save_bank(bank_path, bank)
+            pool = initialize_pool(bank, task_id, run_id, actor="integration_agent")
+            save_pool(pool_path, pool)
+            late_memory = targeted_view(pool, actor="reviewer_agent", limit=3)
+            late_prompt = base.REVIEWER_PROMPT + (("\n\n" + late_memory
+                + CONTRIBUTION_INSTRUCTION + audit) if late_memory else "")
+            (workspace / "late_reviewer_interface_memory.txt").write_text(
+                late_memory, encoding="utf-8")
+            late_reviewer, late_reviewer_error = safe_stage_call(
+                workspace, agent_id, run_id + "-late-reviewer",
+                late_prompt, "codomain_late_reviewer",
+            )
+            late_contributions = ingest_contributions(
+                workspace / "coordination_contributions.json", pool,
+                actor="reviewer_agent", event_log=pool_events,
+            )
+            contribution_summary = {
+                key: contribution_summary.get(key, 0) + late_contributions.get(key, 0)
+                for key in ("submitted", "applied", "rejected")
+            }
+            review_verification = base.verify_solution(workspace)
+
     interface_summary = summarize_audit(workspace / "interface_audit.json", bank) if features["codomain"] else {
         "records": 0, "verified": 0, "failed": 0
     }
@@ -212,12 +252,16 @@ For each shared interface-memory record, exercise the real producer-to-consumer 
             "planner": base.stage_meta(planner), "implementer_pass1": base.stage_meta(implementer1),
             "implementer_recovery": base.stage_meta(implementer2), "codomain_integration": base.stage_meta(integration),
             "reviewer_pass1": base.stage_meta(reviewer1), "reviewer_recovery": base.stage_meta(reviewer2),
+            "codomain_late_integration": base.stage_meta(late_integration),
+            "codomain_late_reviewer": base.stage_meta(late_reviewer),
             "judge": base.stage_meta(judge),
         },
         "stage_errors": {
             "planner": planner_error, "implementer": impl_error, "implementer_recovery": impl_recovery_error,
             "codomain_integration": integration_error, "reviewer": review_error,
             "reviewer_recovery": review_recovery_error, "judge": judge_error,
+            "codomain_late_integration": late_integration_error,
+            "codomain_late_reviewer": late_reviewer_error,
         },
         "input_hashes": hashes, "wall_time_seconds": time.time() - started,
     }
