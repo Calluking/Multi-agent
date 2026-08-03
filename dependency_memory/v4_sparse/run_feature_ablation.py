@@ -21,15 +21,29 @@ from testing_practice_memory import make_episode, render_packet, save_packet
 
 DEFAULT_ROOT = Path(__file__).resolve().parent / "runs_feature_ablation"
 FEATURES = {
-    "baseline": {"dependency": False, "codomain": False, "testing": False},
-    "dependency": {"dependency": True, "codomain": False, "testing": False},
-    "codomain": {"dependency": False, "codomain": True, "testing": False},
-    "both": {"dependency": True, "codomain": True, "testing": False},
-    "testing": {"dependency": False, "codomain": False, "testing": True},
-    "dependency_testing": {"dependency": True, "codomain": False, "testing": True},
-    "codomain_testing": {"dependency": False, "codomain": True, "testing": True},
-    "all_three": {"dependency": True, "codomain": True, "testing": True},
+    "baseline": {"dependency": False, "codomain": False, "testing": False, "prework": False},
+    "dependency": {"dependency": True, "codomain": False, "testing": False, "prework": False},
+    "codomain": {"dependency": False, "codomain": True, "testing": False, "prework": False},
+    "both": {"dependency": True, "codomain": True, "testing": False, "prework": False},
+    "testing": {"dependency": False, "codomain": False, "testing": True, "prework": False},
+    "dependency_testing": {"dependency": True, "codomain": False, "testing": True, "prework": False},
+    "codomain_testing": {"dependency": False, "codomain": True, "testing": True, "prework": False},
+    "all_three": {"dependency": True, "codomain": True, "testing": True, "prework": False},
+    "codomain_prework": {"dependency": False, "codomain": True, "testing": False, "prework": True},
 }
+
+
+PREWORK_PROPOSAL_PROMPT = base.BOUNDARY_EXTRACTOR_PROMPT.replace(
+    "Read only TASK.md and AGENTS.md.",
+    "Read TASK.md, AGENTS.md, and plan.md. Before implementation begins, act as the producer-side "
+    "contract proposer. Do not create solution.py or implementation.md."
+)
+
+PREWORK_CONSUMER_PROMPT = """Act as the consumer-side contract negotiator before implementation begins. Read TASK.md, plan.md, interface_memory.json, and the shared coordination memory appended below. Check whether fields, semantics, producer obligations, consumer obligations, invariants, and the boundary test are sufficient for the consumer to implement without guessing. Do not create solution.py or implementation.md.
+
+Write coordination_contributions.json using exactly this top-level shape:
+{"contributions": [{"memory_id": "interface:exact_id", "action": "accept", "base_version": 1, "claim": "usable as written"}]}.
+Use the key contributions (not events) and action (not event). Emit one decision for every proposed record. If a proposal is usable, accept its exact memory_id and base_version. If incomplete, emit in order: (1) challenge naming the incompatibility, (2) revision with the exact current base_version and a minimal patch resolving it, and (3) accept for the revised version. Keep chat under three lines."""
 
 
 def inject_testing_memory(workspace: Path, task_text: str, role: str,
@@ -115,10 +129,55 @@ def run_one(root: Path, item: dict[str, Any], condition: str, repetition: int) -
     planner, planner_error = safe_stage_call(
         workspace, agent_id, run_id + "-planner", planner_prompt, "planner"
     )
+
+    bank_path = workspace / "interface_memory.json"
+    pool_path = workspace / "coordination_memory.json"
+    pool_events = workspace / "coordination_memory_events.jsonl"
+    prework_proposal = prework_feedback = None
+    prework_proposal_error = prework_feedback_error = None
+    prework_contributions = {"submitted": 0, "applied": 0, "rejected": 0}
+    if features["prework"]:
+        prework_proposal, prework_proposal_error = safe_stage_call(
+            workspace, agent_id, run_id + "-prework-producer",
+            PREWORK_PROPOSAL_PROMPT, "codomain_prework_proposal",
+        )
+        prework_bank = load_or_empty(bank_path, task_id, run_id)
+        save_bank(bank_path, prework_bank)
+        prework_pool = initialize_pool(
+            prework_bank, task_id, run_id, actor="producer_agent"
+        )
+        save_pool(pool_path, prework_pool)
+        consumer_view = targeted_view(
+            prework_pool, actor="consumer_agent", limit=3
+        )
+        consumer_prompt = PREWORK_CONSUMER_PROMPT + "\n\n" + consumer_view
+        prework_feedback, prework_feedback_error = safe_stage_call(
+            workspace, agent_id, run_id + "-prework-consumer",
+            consumer_prompt, "codomain_prework_feedback",
+        )
+        prework_contributions = ingest_contributions(
+            workspace / "coordination_contributions.json", prework_pool,
+            actor="consumer_agent", event_log=pool_events,
+        )
+        save_pool(pool_path, prework_pool)
+        (workspace / "prework_coordination_memory.json").write_text(
+            json.dumps(prework_pool, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+
+    implementation_contract = ""
+    if features["prework"]:
+        implementation_contract = targeted_view(
+            load_pool(pool_path, task_id, run_id), actor="implementer_agent", limit=3
+        )
     implementer_prompt, implementer_testing_packet, selected_testing["implementer"] = inject_testing_memory(
         workspace, task_text, "implementer", base.IMPLEMENTER_PROMPT,
         enabled=features["testing"],
     )
+    if implementation_contract:
+        implementer_prompt += "\n\n" + implementation_contract + "\n\n" + (
+            "PREWORK CONTRACT IS BINDING: implement both producer and consumer against the resolved "
+            "semantics and execute the specified boundary test. Do not silently redefine the contract."
+        )
     implementer1, impl_error = safe_stage_call(
         workspace, agent_id, run_id + "-implementer", implementer_prompt, "implementer_pass1"
     )
@@ -139,10 +198,9 @@ def run_one(root: Path, item: dict[str, Any], condition: str, repetition: int) -
         impl_verification = base.verify_solution(workspace)
     scaffold_origin = bool(impl_blocker and impl_blocker.blocker_type == "artifact_missing" and implementer2)
 
-    bank_path = workspace / "interface_memory.json"
     integration = None
     integration_error = None
-    if features["codomain"] and (workspace / "solution.py").is_file():
+    if features["codomain"] and not features["prework"] and (workspace / "solution.py").is_file():
         integration, integration_error = safe_stage_call(
             workspace, agent_id, run_id + "-integration",
             base.POSTHOC_INTEGRATION_PROMPT, "codomain_integration",
@@ -150,8 +208,6 @@ def run_one(root: Path, item: dict[str, Any], condition: str, repetition: int) -
     bank = load_or_empty(bank_path, task_id, run_id)
     if features["codomain"]:
         save_bank(bank_path, bank)
-    pool_path = workspace / "coordination_memory.json"
-    pool_events = workspace / "coordination_memory_events.jsonl"
     pool = load_pool(pool_path, task_id, run_id)
     if features["codomain"] and not pool.get("records"):
         pool = initialize_pool(bank, task_id, run_id, actor="integration_agent")
@@ -200,7 +256,7 @@ For each shared interface-memory record, exercise the real producer-to-consumer 
     late_integration_error = None
     late_reviewer = None
     late_reviewer_error = None
-    if (features["codomain"] and integration is None
+    if (features["codomain"] and not features["prework"] and integration is None
             and (workspace / "solution.py").is_file()):
         late_integration, late_integration_error = safe_stage_call(
             workspace, agent_id, run_id + "-late-integration",
@@ -269,6 +325,11 @@ For each shared interface-memory record, exercise the real producer-to-consumer 
             "injected_chars": len(impl_recovery_text) + len(review_recovery_text),
         },
         "codomain_memory": {**interface_summary, "integration_called": integration is not None,
+                            "mode": "prework_negotiation" if features["prework"] else "posthoc_integration",
+                            "prework_proposal_called": prework_proposal is not None,
+                            "prework_feedback_called": prework_feedback is not None,
+                            "prework_contributions": prework_contributions,
+                            "implementation_injected_chars": len(implementation_contract),
                             "review_injected_chars": len(review_memory),
                             "coordination_records": len(pool.get("records", [])),
                             "agent_contributions": contribution_summary,
@@ -293,6 +354,8 @@ For each shared interface-memory record, exercise the real producer-to-consumer 
         },
         "stage_meta": {
             "planner": base.stage_meta(planner), "implementer_pass1": base.stage_meta(implementer1),
+            "codomain_prework_proposal": base.stage_meta(prework_proposal),
+            "codomain_prework_feedback": base.stage_meta(prework_feedback),
             "implementer_recovery": base.stage_meta(implementer2), "codomain_integration": base.stage_meta(integration),
             "reviewer_pass1": base.stage_meta(reviewer1), "reviewer_recovery": base.stage_meta(reviewer2),
             "codomain_late_integration": base.stage_meta(late_integration),
@@ -301,6 +364,8 @@ For each shared interface-memory record, exercise the real producer-to-consumer 
         },
         "stage_errors": {
             "planner": planner_error, "implementer": impl_error, "implementer_recovery": impl_recovery_error,
+            "codomain_prework_proposal": prework_proposal_error,
+            "codomain_prework_feedback": prework_feedback_error,
             "codomain_integration": integration_error, "reviewer": review_error,
             "reviewer_recovery": review_recovery_error, "judge": judge_error,
             "codomain_late_integration": late_integration_error,

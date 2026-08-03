@@ -58,6 +58,16 @@ def test_agent_contribution_file_and_targeted_projection(tmp_path):
     assert load_pool(path, 1, "run")["records"][0]["status"] == "challenged"
 
 
+def test_agent_event_alias_is_normalized(tmp_path):
+    pool = initialize_pool(bank(), 1, "run")
+    contribution = tmp_path / "coordination_contributions.json"
+    contribution.write_text(json.dumps({"events": [{"memory_id": "interface:a_to_b",
+        "event": "accept", "base_version": 1}]}))
+    result = ingest_contributions(contribution, pool, actor="consumer_agent")
+    assert result == {"submitted": 1, "applied": 1, "rejected": 0}
+    assert pool["records"][0]["status"] == "agreed"
+
+
 def test_audit_accepts_pool_prefixed_memory_id(tmp_path):
     pool = initialize_pool(bank(), 1, "run")
     audit = tmp_path / "interface_audit.json"

@@ -191,6 +191,10 @@ def ingest_contributions(path: Path, pool: dict[str, Any], *, actor: str,
     except Exception:
         return {"submitted": 0, "applied": 0, "rejected": 0}
     items = raw.get("contributions", []) if isinstance(raw, dict) else []
+    # Accept a harmless envelope alias while retaining strict state-machine
+    # validation for memory ids, versions, and allowed transitions.
+    if isinstance(raw, dict) and not items and isinstance(raw.get("events"), list):
+        items = raw["events"]
     if not isinstance(items, list):
         return {"submitted": 0, "applied": 0, "rejected": 0}
     applied = rejected = 0
@@ -198,6 +202,8 @@ def ingest_contributions(path: Path, pool: dict[str, Any], *, actor: str,
         if not isinstance(item, dict):
             rejected += 1
             continue
+        if "action" not in item and "event" in item:
+            item = {**item, "action": item["event"]}
         event = {**item, "actor": actor}
         ok = apply_event(pool, event, default_actor=actor)
         applied += int(ok)
