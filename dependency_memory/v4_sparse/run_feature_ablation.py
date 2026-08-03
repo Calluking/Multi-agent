@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a 2x2 ablation of dependency and cross-domain memory mechanisms."""
+"""Run feature ablations for dependency, cross-domain, and testing memory."""
 
 from __future__ import annotations
 
@@ -16,15 +16,29 @@ from coordination_memory import (CONTRIBUTION_INSTRUCTION, ingest_audit,
                                   save_pool, targeted_view)
 from interface_memory import compact_view, load_or_empty, save_bank, summarize_audit
 from sparse_memory import append_event, fail_open_observe, observe_blocker, recovery_prompt
+from testing_practice_memory import make_episode, render_packet, save_packet
 
 
 DEFAULT_ROOT = Path(__file__).resolve().parent / "runs_feature_ablation"
 FEATURES = {
-    "baseline": {"dependency": False, "codomain": False},
-    "dependency": {"dependency": True, "codomain": False},
-    "codomain": {"dependency": False, "codomain": True},
-    "both": {"dependency": True, "codomain": True},
+    "baseline": {"dependency": False, "codomain": False, "testing": False},
+    "dependency": {"dependency": True, "codomain": False, "testing": False},
+    "codomain": {"dependency": False, "codomain": True, "testing": False},
+    "both": {"dependency": True, "codomain": True, "testing": False},
+    "testing": {"dependency": False, "codomain": False, "testing": True},
+    "dependency_testing": {"dependency": True, "codomain": False, "testing": True},
+    "codomain_testing": {"dependency": False, "codomain": True, "testing": True},
+    "all_three": {"dependency": True, "codomain": True, "testing": True},
 }
+
+
+def inject_testing_memory(workspace: Path, task_text: str, role: str,
+                          prompt: str, *, enabled: bool) -> tuple[str, str, list[str]]:
+    """Append a role packet without creating any additional Agent call."""
+    packet, selected = render_packet(task_text, role) if enabled else ("", [])
+    save_packet(workspace, role, packet, selected)
+    combined = prompt + (("\n\n" + packet) if packet else "")
+    return combined, packet, selected
 
 
 def safe_stage_call(workspace: Path, *args: Any):
@@ -89,14 +103,24 @@ def run_one(root: Path, item: dict[str, Any], condition: str, repetition: int) -
     }
     (workspace / "input_manifest.json").write_text(json.dumps(hashes, indent=2) + "\n", encoding="utf-8")
     (workspace / "feature_flags.json").write_text(json.dumps(features, indent=2) + "\n", encoding="utf-8")
+    task_text = item["task"]["content"]
+    selected_testing: dict[str, list[str]] = {}
 
     agent_id = f"mab-ablation-{condition}-t{task_id:02d}-{uuid.uuid4().hex[:6]}"
     base.ensure_agent(agent_id, workspace)
+    planner_prompt, planner_testing_packet, selected_testing["planner"] = inject_testing_memory(
+        workspace, task_text, "planner", base.BASELINE_PLANNER_PROMPT,
+        enabled=features["testing"],
+    )
     planner, planner_error = safe_stage_call(
-        workspace, agent_id, run_id + "-planner", base.BASELINE_PLANNER_PROMPT, "planner"
+        workspace, agent_id, run_id + "-planner", planner_prompt, "planner"
+    )
+    implementer_prompt, implementer_testing_packet, selected_testing["implementer"] = inject_testing_memory(
+        workspace, task_text, "implementer", base.IMPLEMENTER_PROMPT,
+        enabled=features["testing"],
     )
     implementer1, impl_error = safe_stage_call(
-        workspace, agent_id, run_id + "-implementer", base.IMPLEMENTER_PROMPT, "implementer_pass1"
+        workspace, agent_id, run_id + "-implementer", implementer_prompt, "implementer_pass1"
     )
     impl_verification = base.verify_solution(workspace)
     impl_blocker = observe_dependency(
@@ -137,8 +161,12 @@ def run_one(root: Path, item: dict[str, Any], condition: str, repetition: int) -
 
 SHARED BOUNDARY AGREEMENT AUDIT
 For each shared interface-memory record, exercise the real producer-to-consumer path. Repair semantic mismatches. Create interface_audit.json as valid JSON: {"interfaces": [{"interface_id": "exact ID", "passed": true, "evidence": ["exact observation"], "blocker": null}]}. Do not infer success from class names or isolated unit tests."""
-    reviewer_prompt = base.REVIEWER_PROMPT + (("\n\n" + review_memory + CONTRIBUTION_INSTRUCTION + audit)
-                                               if review_memory else "")
+    reviewer_base, reviewer_testing_packet, selected_testing["reviewer"] = inject_testing_memory(
+        workspace, task_text, "reviewer", base.REVIEWER_PROMPT,
+        enabled=features["testing"],
+    )
+    reviewer_prompt = reviewer_base + (("\n\n" + review_memory + CONTRIBUTION_INSTRUCTION + audit)
+                                        if review_memory else "")
     (workspace / "reviewer_interface_memory.txt").write_text(review_memory, encoding="utf-8")
     reviewer1, review_error = safe_stage_call(
         workspace, agent_id, run_id + "-reviewer", reviewer_prompt, "reviewer_pass1"
@@ -185,7 +213,7 @@ For each shared interface-memory record, exercise the real producer-to-consumer 
             pool = initialize_pool(bank, task_id, run_id, actor="integration_agent")
             save_pool(pool_path, pool)
             late_memory = targeted_view(pool, actor="reviewer_agent", limit=3)
-            late_prompt = base.REVIEWER_PROMPT + (("\n\n" + late_memory
+            late_prompt = reviewer_base + (("\n\n" + late_memory
                 + CONTRIBUTION_INSTRUCTION + audit) if late_memory else "")
             (workspace / "late_reviewer_interface_memory.txt").write_text(
                 late_memory, encoding="utf-8")
@@ -248,6 +276,21 @@ For each shared interface-memory record, exercise the real producer-to-consumer 
                             "open_challenges": sum(1 for record in pool.get("records", [])
                                 for challenge in record.get("open_challenges", [])
                                 if challenge.get("status") == "open")},
+        "testing_memory": {
+            "enabled": features["testing"],
+            "mode": "inject_only",
+            "selected_by_role": selected_testing,
+            "injected_chars": {
+                "planner": len(planner_testing_packet),
+                "implementer": len(implementer_testing_packet),
+                "reviewer": len(reviewer_testing_packet),
+                "total": len(planner_testing_packet) + len(implementer_testing_packet)
+                         + len(reviewer_testing_packet),
+            },
+            "extra_agent_calls": 0,
+            "rerouting": False,
+            "automatic_retry": False,
+        },
         "stage_meta": {
             "planner": base.stage_meta(planner), "implementer_pass1": base.stage_meta(implementer1),
             "implementer_recovery": base.stage_meta(implementer2), "codomain_integration": base.stage_meta(integration),
@@ -265,6 +308,11 @@ For each shared interface-memory record, exercise the real producer-to-consumer 
         },
         "input_hashes": hashes, "wall_time_seconds": time.time() - started,
     }
+    if features["testing"]:
+        episode = make_episode(task_id=task_id, run_id=run_id, condition=condition,
+                               selected_by_role=selected_testing, result=result)
+        (workspace / "testing_episode.json").write_text(
+            json.dumps(episode, indent=2) + "\n", encoding="utf-8")
     (workspace / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     return result
 

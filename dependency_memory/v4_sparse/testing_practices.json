@@ -1,0 +1,50 @@
+{
+  "schema_version": "0.1",
+  "memory_type": "semantic_testing_practice_bank",
+  "practices": [
+    {
+      "practice_id": "reject_semantic_substitute",
+      "title": "Test the defining capability, not a convenient substitute",
+      "triggers": ["machine learning", "ml", "adaptive", "real-time", "interactive", "distributed", "websocket"],
+      "roles": ["planner", "implementer", "reviewer"],
+      "rule": "A simplified proxy does not satisfy the original requirement unless its behavioral equivalence is demonstrated.",
+      "invalid_substitutes": ["fixed heuristics presented as machine learning", "synchronous callbacks presented as real-time communication", "static output presented as interactive behavior"],
+      "required_evidence": ["identify the requirement's defining observable property", "exercise that property rather than only the chosen proxy", "state explicitly when the required capability is absent"],
+      "supporting_episodes": ["baseline_task_11", "baseline_task_14", "baseline_task_20"],
+      "confidence": 0.96
+    },
+    {
+      "practice_id": "preserve_acceptance_oracle",
+      "title": "Do not weaken a failing acceptance oracle",
+      "triggers": ["test", "validation", "authorization", "deadline", "conflict", "permission", "edge case"],
+      "roles": ["implementer", "reviewer"],
+      "rule": "Changing a test is valid only when the revised assertion still expresses the original acceptance requirement.",
+      "invalid_substitutes": ["injecting private state to bypass the public workflow", "removing a failing assertion without replacing its requirement coverage", "changing expected output merely to match current behavior"],
+      "required_evidence": ["explain why a changed test was incorrect", "map the replacement assertion to the original requirement", "retain an executable regression check"],
+      "supporting_episodes": ["baseline_task_05", "baseline_task_14"],
+      "confidence": 0.94
+    },
+    {
+      "practice_id": "require_executed_evidence",
+      "title": "A completion claim needs executed evidence",
+      "triggers": ["test", "execute", "run", "application", "platform", "system"],
+      "roles": ["implementer", "reviewer"],
+      "rule": "Generated tests, class names and review prose are not evidence until the relevant command executes and the required behavior is observed.",
+      "invalid_substitutes": ["zero collected tests", "a PASS claim without command output", "isolated construction tests for an end-to-end requirement"],
+      "required_evidence": ["run the required default entrypoint exactly as the task or harness will invoke it", "record the exact command, exit status and observed behavior", "distinguish collection failure from a passing suite"],
+      "supporting_episodes": ["baseline_task_09"],
+      "confidence": 0.93
+    },
+    {
+      "practice_id": "independent_requirement_audit",
+      "title": "Review against the task, not only the implementation's assumptions",
+      "triggers": ["review", "requirement", "component", "collaboration", "analysis", "feedback"],
+      "roles": ["reviewer"],
+      "rule": "Before approval, reconstruct acceptance targets from the original task and challenge tests that only validate the implementer's interpretation.",
+      "invalid_substitutes": ["repeating the implementer's tests", "treating deterministic output as proof of the requested technology", "approving every checklist item from names alone"],
+      "required_evidence": ["map each central requirement to an independent observation", "add at least one counterexample for the highest-risk claim", "report unsupported requirements as unsupported"],
+      "supporting_episodes": ["baseline_task_11", "baseline_task_14", "baseline_task_20"],
+      "confidence": 0.95
+    }
+  ]
+}

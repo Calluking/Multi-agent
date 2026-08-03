@@ -72,6 +72,24 @@ python3 run_feature_ablation.py \
   --root ./runs_feature_ablation_task1
 ```
 
+## Inject-only testing practice memory
+
+The feature runner also exposes a third independent `testing` flag. It retrieves
+role-relevant semantic testing practices and appends a compact packet to the
+existing Planner, Implementer, and Reviewer prompts. It adds no Agent calls,
+retries, gates, or rerouting.
+
+Available testing conditions are `testing`, `dependency_testing`,
+`codomain_testing`, and `all_three`. For an off/on Task 11 comparison:
+
+```bash
+cd dependency_memory/v4_sparse
+python3 run_feature_ablation.py --tasks 11 --condition baseline --root ./runs_t11_off
+python3 run_feature_ablation.py --tasks 11 --condition testing --root ./runs_t11_on
+```
+
+See `docs/TESTING_PRACTICE_MEMORY_TASK11_20260731.md` for the first worked example.
+
 ## Quick checks
 
 ```bash
