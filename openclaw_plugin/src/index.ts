@@ -38,7 +38,9 @@ export default definePluginEntry({
     }, { priority: 80, timeoutMs: 10_000 });
 
     api.on("subagent_spawned", async (event: any, ctx: any) => {
-      const parent = event.parentSessionKey ?? ctx.sessionKey ?? "unknown-parent";
+      // OpenClaw exposes the parent/requester identity on the subagent hook
+      // context, not as parentSessionKey on the event.
+      const parent = ctx.requesterSessionKey ?? event.requesterSessionKey ?? "unknown-parent";
       const pending = pendingByParent.get(parent)?.shift();
       if (pending && event.childSessionKey) childLedger.set(event.childSessionKey, pending);
     });
