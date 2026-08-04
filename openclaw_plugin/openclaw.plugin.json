@@ -1,0 +1,22 @@
+{
+  "id": "multiagent-memory",
+  "name": "Multi-Agent Memory",
+  "description": "Injects private dependency, shared co-domain contract, and testing-practice memory into spawned subagents.",
+  "version": "0.1.0",
+  "activation": { "onStartup": true },
+  "contracts": {
+    "tools": ["multiagent_memory_record", "multiagent_memory_inspect"]
+  },
+  "skills": ["skills"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "storeRoot": { "type": "string", "description": "Directory containing the three memory banks." },
+      "dependencyEnabled": { "type": "boolean", "default": true },
+      "codomainEnabled": { "type": "boolean", "default": true },
+      "testingEnabled": { "type": "boolean", "default": true },
+      "maxItemsPerMemory": { "type": "integer", "minimum": 1, "maximum": 8, "default": 3 }
+    }
+  }
+}

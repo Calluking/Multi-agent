@@ -1,0 +1,16 @@
+{
+  plugins: {
+    entries: {
+      "multiagent-memory": {
+        enabled: true,
+        config: {
+          storeRoot: "/home/luzh/.openclaw/multiagent-memory",
+          dependencyEnabled: true,
+          codomainEnabled: true,
+          testingEnabled: true,
+          maxItemsPerMemory: 3,
+        },
+      },
+    },
+  },
+}

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "0.1",
+  "items": [
+    {
+      "id": "dependency:example:solution-artifact",
+      "kind": "dependency",
+      "scope": "private",
+      "title": "Required solution artifact",
+      "text": "Before handing off, create the requested solution artifact and provide an executable verification result.",
+      "tags": ["artifact", "handoff", "verification"],
+      "status": "required",
+      "evidence": [],
+      "updatedAt": "2026-08-04T00:00:00.000Z"
+    }
+  ]
+}

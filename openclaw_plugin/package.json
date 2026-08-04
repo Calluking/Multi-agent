@@ -1,0 +1,26 @@
+{
+  "name": "@multi-agent/memory-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "files": ["dist", "skills", "openclaw.plugin.json", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "plugin:build": "npm run build",
+    "plugin:validate": "npm run check"
+  },
+  "dependencies": {
+    "typebox": "^1.1.38"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "typescript": "^5.9.2"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.5.17"
+  },
+  "openclaw": {
+    "extensions": ["./dist/index.js"]
+  }
+}
