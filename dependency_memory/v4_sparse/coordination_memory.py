@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 
-ALLOWED_ACTIONS = {"proposal", "challenge", "revision", "accept", "verification"}
+ALLOWED_ACTIONS = {"proposal", "challenge", "revision", "accept", "accept_revision", "verification"}
 MAX_HISTORY = 50
 MAX_CONTRIBUTIONS_PER_TURN = 10
 
@@ -36,7 +36,8 @@ def empty_pool(task_id: int, run_id: str) -> dict[str, Any]:
 def _contract(item: dict[str, Any]) -> dict[str, Any]:
     return {key: deepcopy(item.get(key)) for key in (
         "interface_id", "producer", "consumer", "purpose", "task_evidence",
-        "risk", "fields", "producer_obligations", "consumer_obligations",
+        "artifact", "producer_agent", "consumer_agents", "risk", "fields",
+        "producer_obligations", "consumer_obligations",
         "invariants", "boundary_test",
     )}
 
@@ -50,14 +51,19 @@ def initialize_pool(bank: dict[str, Any], task_id: int, run_id: str,
         if not interface_id:
             continue
         contract = _contract(item)
+        producer_agent = str(item.get("producer_agent", "")).strip()
+        consumer_agents = [str(x).strip() for x in item.get("consumer_agents", [])
+                           if str(x).strip()]
+        explicit_routing = bool(producer_agent and consumer_agents)
         pool["records"].append({
             "memory_id": f"interface:{interface_id}",
             "memory_type": "interface_contract",
             "scope": "boundary",
             "participants": {
-                "producer": item.get("producer"),
-                "consumers": [item.get("consumer")],
+                "producer": producer_agent or item.get("producer"),
+                "consumers": consumer_agents or [item.get("consumer")],
                 "reviewers": ["reviewer_agent"],
+                "explicit_routing": explicit_routing,
             },
             "version": 1,
             "status": "proposed",
@@ -134,7 +140,7 @@ def apply_event(pool: dict[str, Any], raw: dict[str, Any], *, default_actor: str
         record.setdefault("open_challenges", []).append(challenge)
         record["status"] = "challenged"
         event["version"] = current
-    elif action == "revision":
+    elif action in {"revision", "accept_revision"}:
         if event["base_version"] != current:
             return False
         resolved = record.setdefault("resolved", {})
@@ -147,7 +153,7 @@ def apply_event(pool: dict[str, Any], raw: dict[str, Any], *, default_actor: str
             if challenge.get("status") == "open":
                 challenge["status"] = "addressed"
                 challenge["resolved_by_version"] = record["version"]
-        record["status"] = "revised"
+        record["status"] = "agreed" if action == "accept_revision" else "revised"
         record["verification"] = {"state": "pending", "evidence": [], "blocker": None}
     elif action == "accept":
         if event["base_version"] not in (None, current):
@@ -163,6 +169,10 @@ def apply_event(pool: dict[str, Any], raw: dict[str, Any], *, default_actor: str
             "blocker": event["blocker"],
         }
         record["status"] = "verified" if passed else "challenged"
+        if passed:
+            for challenge in record.get("open_challenges", []):
+                if challenge.get("status") == "open":
+                    challenge["status"] = "resolved_by_verification"
         if not passed and event["blocker"]:
             record.setdefault("open_challenges", []).append({
                 "challenge_id": event["event_id"], "actor": event["actor"],
@@ -252,6 +262,7 @@ def targeted_view(pool: dict[str, Any], *, actor: str, limit: int = 3) -> str:
     """Render current contracts and relevant open issues, never full history."""
     records = sorted(pool.get("records", []),
                      key=lambda x: (-int(x.get("resolved", {}).get("risk", 3)), x.get("memory_id", "")))
+    records = [record for record in records if _visible_to(record, actor)]
     if not records:
         return ""
     lines = ["SHARED COORDINATION MEMORY — RESOLVED CONTRACTS AND OPEN CHALLENGES",
@@ -273,6 +284,17 @@ def targeted_view(pool: dict[str, Any], *, actor: str, limit: int = 3) -> str:
         lines.append(f"Verification: {verification.get('state', 'pending')}"
                      + (f"; blocker={verification.get('blocker')}" if verification.get("blocker") else ""))
     return "\n".join(lines)
+
+
+def _visible_to(record: dict[str, Any], actor: str) -> bool:
+    """Enforce edge-local visibility when a record has explicit Agent routing."""
+    participants = record.get("participants", {})
+    if not participants.get("explicit_routing"):
+        return True
+    allowed = {str(participants.get("producer", ""))}
+    allowed.update(str(x) for x in participants.get("consumers", []))
+    allowed.update(str(x) for x in participants.get("reviewers", []))
+    return actor in allowed
 
 
 CONTRIBUTION_INSTRUCTION = """

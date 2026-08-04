@@ -91,6 +91,12 @@ def normalize_bank(raw: Any, task_id: int, run_id: str) -> dict[str, Any]:
         test = item.get("boundary_test", {}) if isinstance(item.get("boundary_test"), dict) else {}
         bank["interfaces"].append({
             "interface_id": interface_id, "producer": producer, "consumer": consumer,
+            "artifact": str(item.get("artifact", ""))[:160],
+            "producer_agent": str(item.get("producer_agent", ""))[:100],
+            "consumer_agents": (
+                [str(x)[:100] for x in item.get("consumer_agents", [])[:5]]
+                if isinstance(item.get("consumer_agents"), list) else []
+            ),
             "purpose": purpose, "task_evidence": str(item.get("task_evidence", ""))[:320],
             "risk": max(1, min(5, int(item.get("risk", 3)))) if str(item.get("risk", 3)).isdigit() else 3,
             "fields": fields,

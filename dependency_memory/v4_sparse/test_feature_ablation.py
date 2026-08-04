@@ -12,8 +12,14 @@ def test_feature_matrix_is_complete_and_orthogonal():
         "codomain_testing": {"dependency": False, "codomain": True, "testing": True, "prework": False},
         "all_three": {"dependency": True, "codomain": True, "testing": True, "prework": False},
         "codomain_prework": {"dependency": False, "codomain": True, "testing": False, "prework": True},
+        "codomain_prework_v2": {"dependency": False, "codomain": True, "testing": False,
+                                 "prework": True, "optimized_prework": True},
+        "codomain_boundary": {"dependency": False, "codomain": True, "testing": False,
+                              "prework": False, "selective": True},
+        "all_three_prework_v2": {"dependency": True, "codomain": True, "testing": True,
+                                  "prework": True, "optimized_prework": True},
     }
-    assert len({tuple(flags.values()) for flags in FEATURES.values()}) == 9
+    assert len({tuple(flags.values()) for flags in FEATURES.values()}) == 12
 
 
 def test_testing_toggle_does_not_enable_recovery_mechanisms():

@@ -75,3 +75,33 @@ def test_audit_accepts_pool_prefixed_memory_id(tmp_path):
         "passed": True, "evidence": ["passed"], "blocker": None}]}))
     assert ingest_audit(audit, pool) == {"submitted": 1, "applied": 1, "rejected": 0}
     assert pool["records"][0]["verification"]["state"] == "verified"
+
+
+def test_explicit_boundary_is_visible_only_to_participants():
+    raw = {"interfaces": [{"interface_id": "producer_to_consumer",
+        "producer": "producer", "consumer": "consumer", "artifact": "solution.py",
+        "producer_agent": "agent-data-7", "consumer_agents": ["agent-model-3"],
+        "purpose": "share one artifact contract", "risk": 5,
+        "fields": [{"name": "result", "type": "object", "meaning": "public output"}],
+        "producer_obligations": ["produce result"],
+        "consumer_obligations": ["validate result"],
+        "invariants": ["result uses the agreed schema"],
+        "boundary_test": {"setup": "artifact exists", "action": "consumer reads it",
+                          "expected": "schema is accepted"}}]}
+    explicit_bank = normalize_bank(raw, 1, "run")
+    pool = initialize_pool(explicit_bank, 1, "run", actor="agent-data-7")
+    assert "producer_to_consumer" in targeted_view(pool, actor="agent-data-7")
+    assert "producer_to_consumer" in targeted_view(pool, actor="agent-model-3")
+    assert "producer_to_consumer" not in targeted_view(pool, actor="unrelated_agent")
+
+
+def test_consumer_can_atomically_revise_and_accept():
+    pool = initialize_pool(bank(), 1, "run")
+    assert apply_event(pool, {"memory_id": "interface:a_to_b", "action": "accept_revision",
+        "base_version": 1, "claim": "accepted with explicit consumer requirement",
+        "patch": {"consumer_obligations": ["validate label and value"]}},
+        default_actor="agent_b")
+    record = pool["records"][0]
+    assert record["version"] == 2
+    assert record["status"] == "agreed"
+    assert record["resolved"]["consumer_obligations"] == ["validate label and value"]

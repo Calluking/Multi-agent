@@ -29,7 +29,13 @@ FEATURES = {
     "dependency_testing": {"dependency": True, "codomain": False, "testing": True, "prework": False},
     "codomain_testing": {"dependency": False, "codomain": True, "testing": True, "prework": False},
     "all_three": {"dependency": True, "codomain": True, "testing": True, "prework": False},
+    "all_three_prework_v2": {"dependency": True, "codomain": True, "testing": True,
+                              "prework": True, "optimized_prework": True},
     "codomain_prework": {"dependency": False, "codomain": True, "testing": False, "prework": True},
+    "codomain_prework_v2": {"dependency": False, "codomain": True, "testing": False,
+                             "prework": True, "optimized_prework": True},
+    "codomain_boundary": {"dependency": False, "codomain": True, "testing": False,
+                          "prework": False, "selective": True},
 }
 
 
@@ -44,6 +50,28 @@ PREWORK_CONSUMER_PROMPT = """Act as the consumer-side contract negotiator before
 Write coordination_contributions.json using exactly this top-level shape:
 {"contributions": [{"memory_id": "interface:exact_id", "action": "accept", "base_version": 1, "claim": "usable as written"}]}.
 Use the key contributions (not events) and action (not event). Emit one decision for every proposed record. If a proposal is usable, accept its exact memory_id and base_version. If incomplete, emit in order: (1) challenge naming the incompatibility, (2) revision with the exact current base_version and a minimal patch resolving it, and (3) accept for the revised version. Keep chat under three lines."""
+
+PREWORK_V2_PRODUCER_PROMPT = """You are the actual Producer Agent assigned to create an artifact in your next turn. Read TASK.md, AGENTS.md, and plan.md. Before working, identify exactly one highest-risk artifact boundary where your output will be used by the downstream Consumer Agent named in the required JSON template. Do not create the artifact yet.
+
+Write interface_memory.json as valid JSON using exactly this shape and exactly one interface:
+{"interfaces": [{"interface_id": "short_id", "artifact": "concrete artifact or API", "producer_agent": "__PRODUCER_AGENT_ID__", "consumer_agents": ["__CONSUMER_AGENT_ID__"], "producer": "component that produces it", "consumer": "component or activity that consumes it", "purpose": "why this crossing exists", "task_evidence": "exact task requirement", "risk": 5, "fields": [{"name": "field", "type": "type", "meaning": "semantic meaning"}], "producer_obligations": ["one concrete guarantee"], "consumer_obligations": ["one concrete consumption requirement"], "invariants": ["one cross-boundary invariant"], "boundary_test": {"setup": "concrete setup", "action": "real crossing", "expected": "observable result"}}]}.
+All strings must be grounded in this task. This is a proposal for the real work you will perform, not a generic architecture summary. Keep chat under three lines."""
+
+PREWORK_V2_CONSUMER_PROMPT = """You are the actual downstream Consumer Agent that will use or verify the Producer's artifact in your next turn. Read TASK.md, plan.md, interface_memory.json, and the single proposed contract appended below. Before work begins, decide whether this contract gives you enough concrete information to consume the artifact without guessing. Do not consume or modify the artifact yet.
+
+Write coordination_contributions.json as valid JSON with exactly one contribution. If usable without changes, use:
+{"contributions": [{"memory_id": "interface:exact_id", "action": "accept", "base_version": 1, "claim": "The consumer can use and verify this artifact without guessing because ..."}]}.
+If one or more consumer requirements are missing, use the atomic accept_revision action with a minimal patch containing only valid contract keys:
+{"contributions": [{"memory_id": "interface:exact_id", "action": "accept_revision", "base_version": 1, "claim": "Accepted after adding the required consumer detail: ...", "patch": {"consumer_obligations": ["complete revised obligations"], "boundary_test": {"setup": "setup", "action": "crossing", "expected": "observable result"}}}]}.
+Do not emit a standalone challenge, introduce another interface, or add unrelated requirements. Keep chat under three lines."""
+
+BOUNDARY_PRODUCER_INSTRUCTION = """
+
+BOUNDARY-SCOPED COORDINATION MEMORY
+While implementing the task normally, identify exactly one highest-impact artifact boundary that your work produces and the downstream Reviewer must consume or verify. Do not invent pairwise relationships with unrelated Agents. Write interface_memory.json with exactly one interface record using the normal interface schema plus these routing fields:
+{"interfaces": [{"interface_id": "short_id", "artifact": "actual artifact or API", "producer_agent": "implementer_agent", "consumer_agents": ["reviewer_agent"], "producer": "actual producing component", "consumer": "actual consuming component", "purpose": "why the crossing exists", "task_evidence": "exact task requirement", "risk": 5, "fields": [], "producer_obligations": ["one concrete obligation"], "consumer_obligations": ["one concrete obligation"], "invariants": ["one invariant"], "boundary_test": {"setup": "setup", "action": "real producer-to-consumer crossing", "expected": "observable result"}}]}.
+The record is visible only to implementer_agent and reviewer_agent. Keep it concise and grounded in the artifact you actually create; do not add a separate negotiation transcript.
+"""
 
 
 def inject_testing_memory(workspace: Path, task_text: str, role: str,
@@ -121,6 +149,17 @@ def run_one(root: Path, item: dict[str, Any], condition: str, repetition: int) -
     selected_testing: dict[str, list[str]] = {}
 
     agent_id = f"mab-ablation-{condition}-t{task_id:02d}-{uuid.uuid4().hex[:6]}"
+    producer_actor = f"agent-{uuid.uuid4().hex[:8]}"
+    consumer_actor = f"agent-{uuid.uuid4().hex[:8]}"
+    participant_registry = {
+        "boundary_routing": "runtime_agent_ids",
+        "producer": {"agent_id": producer_actor, "session": run_id + "-implementer"},
+        "consumers": [{"agent_id": consumer_actor, "session": run_id + "-reviewer"}],
+        "note": "Stage/session bindings belong to this runner; coordination memory routes only by agent_id.",
+    }
+    (workspace / "coordination_participants.json").write_text(
+        json.dumps(participant_registry, indent=2) + "\n", encoding="utf-8"
+    )
     base.ensure_agent(agent_id, workspace)
     planner_prompt, planner_testing_packet, selected_testing["planner"] = inject_testing_memory(
         workspace, task_text, "planner", base.BASELINE_PLANNER_PROMPT,
@@ -135,30 +174,58 @@ def run_one(root: Path, item: dict[str, Any], condition: str, repetition: int) -
     pool_events = workspace / "coordination_memory_events.jsonl"
     prework_proposal = prework_feedback = None
     prework_proposal_error = prework_feedback_error = None
+    prework_contract_valid = True
     prework_contributions = {"submitted": 0, "applied": 0, "rejected": 0}
     if features["prework"]:
+        optimized_prework = features.get("optimized_prework", False)
+        producer_prompt = PREWORK_V2_PRODUCER_PROMPT if optimized_prework else PREWORK_PROPOSAL_PROMPT
+        if optimized_prework:
+            producer_prompt = (producer_prompt
+                .replace("__PRODUCER_AGENT_ID__", producer_actor)
+                .replace("__CONSUMER_AGENT_ID__", consumer_actor))
+        producer_session = run_id + ("-implementer" if optimized_prework else "-prework-producer")
         prework_proposal, prework_proposal_error = safe_stage_call(
-            workspace, agent_id, run_id + "-prework-producer",
-            PREWORK_PROPOSAL_PROMPT, "codomain_prework_proposal",
+            workspace, agent_id, producer_session,
+            producer_prompt, "codomain_prework_proposal",
         )
         prework_bank = load_or_empty(bank_path, task_id, run_id)
+        if optimized_prework and len(prework_bank.get("interfaces", [])) > 1:
+            prework_bank["interfaces"] = prework_bank["interfaces"][:1]
+        if optimized_prework and len(prework_bank.get("interfaces", [])) != 1:
+            prework_contract_valid = False
+            prework_proposal_error = prework_proposal_error or "prework_v2 produced no valid boundary contract"
         save_bank(bank_path, prework_bank)
         prework_pool = initialize_pool(
-            prework_bank, task_id, run_id, actor="producer_agent"
+            prework_bank, task_id, run_id,
+            actor=producer_actor if optimized_prework else "producer_agent"
         )
         save_pool(pool_path, prework_pool)
         consumer_view = targeted_view(
-            prework_pool, actor="consumer_agent", limit=3
+            prework_pool,
+            actor=consumer_actor if optimized_prework else "consumer_agent",
+            limit=1 if optimized_prework else 3,
         )
-        consumer_prompt = PREWORK_CONSUMER_PROMPT + "\n\n" + consumer_view
+        consumer_prompt = (
+            PREWORK_V2_CONSUMER_PROMPT if optimized_prework else PREWORK_CONSUMER_PROMPT
+        ) + "\n\n" + consumer_view
+        consumer_session = run_id + ("-reviewer" if optimized_prework else "-prework-consumer")
         prework_feedback, prework_feedback_error = safe_stage_call(
-            workspace, agent_id, run_id + "-prework-consumer",
+            workspace, agent_id, consumer_session,
             consumer_prompt, "codomain_prework_feedback",
         )
         prework_contributions = ingest_contributions(
             workspace / "coordination_contributions.json", prework_pool,
-            actor="consumer_agent", event_log=pool_events,
+            actor=consumer_actor if optimized_prework else "consumer_agent",
+            event_log=pool_events,
         )
+        if optimized_prework:
+            agreed_records = [r for r in prework_pool.get("records", [])
+                              if r.get("status") == "agreed"]
+            if len(agreed_records) != 1:
+                prework_contract_valid = False
+                prework_feedback_error = prework_feedback_error or (
+                    "prework_v2 consumer did not produce exactly one agreed contract"
+                )
         save_pool(pool_path, prework_pool)
         (workspace / "prework_coordination_memory.json").write_text(
             json.dumps(prework_pool, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -167,16 +234,21 @@ def run_one(root: Path, item: dict[str, Any], condition: str, repetition: int) -
     implementation_contract = ""
     if features["prework"]:
         implementation_contract = targeted_view(
-            load_pool(pool_path, task_id, run_id), actor="implementer_agent", limit=3
+            load_pool(pool_path, task_id, run_id),
+            actor=producer_actor if features.get("optimized_prework") else "implementer_agent",
+            limit=1 if features.get("optimized_prework") else 3,
         )
     implementer_prompt, implementer_testing_packet, selected_testing["implementer"] = inject_testing_memory(
         workspace, task_text, "implementer", base.IMPLEMENTER_PROMPT,
         enabled=features["testing"],
     )
+    if features.get("selective"):
+        implementer_prompt += BOUNDARY_PRODUCER_INSTRUCTION
     if implementation_contract:
         implementer_prompt += "\n\n" + implementation_contract + "\n\n" + (
-            "PREWORK CONTRACT IS BINDING: implement both producer and consumer against the resolved "
-            "semantics and execute the specified boundary test. Do not silently redefine the contract."
+            "PREWORK CONTRACT IS BINDING: produce the named artifact according to the resolved "
+            "interface, producer obligations, and invariants. The downstream Consumer owns its listed "
+            "obligations and will execute the boundary test; do not implement work assigned only to it."
         )
     implementer1, impl_error = safe_stage_call(
         workspace, agent_id, run_id + "-implementer", implementer_prompt, "implementer_pass1"
@@ -198,9 +270,20 @@ def run_one(root: Path, item: dict[str, Any], condition: str, repetition: int) -
         impl_verification = base.verify_solution(workspace)
     scaffold_origin = bool(impl_blocker and impl_blocker.blocker_type == "artifact_missing" and implementer2)
 
+    if features.get("selective"):
+        selective_bank = load_or_empty(bank_path, task_id, run_id)
+        if len(selective_bank.get("interfaces", [])) > 1:
+            selective_bank["interfaces"] = selective_bank["interfaces"][:1]
+        save_bank(bank_path, selective_bank)
+        selective_pool = initialize_pool(
+            selective_bank, task_id, run_id, actor="implementer_agent"
+        )
+        save_pool(pool_path, selective_pool)
+
     integration = None
     integration_error = None
-    if features["codomain"] and not features["prework"] and (workspace / "solution.py").is_file():
+    if (features["codomain"] and not features["prework"] and not features.get("selective")
+            and (workspace / "solution.py").is_file()):
         integration, integration_error = safe_stage_call(
             workspace, agent_id, run_id + "-integration",
             base.POSTHOC_INTEGRATION_PROMPT, "codomain_integration",
@@ -212,7 +295,11 @@ def run_one(root: Path, item: dict[str, Any], condition: str, repetition: int) -
     if features["codomain"] and not pool.get("records"):
         pool = initialize_pool(bank, task_id, run_id, actor="integration_agent")
         save_pool(pool_path, pool)
-    review_memory = targeted_view(pool, actor="reviewer_agent", limit=3) if features["codomain"] else ""
+    review_actor = consumer_actor if features.get("optimized_prework") else "reviewer_agent"
+    review_memory = targeted_view(
+        pool, actor=review_actor,
+        limit=1 if (features.get("selective") or features.get("optimized_prework")) else 3
+    ) if features["codomain"] else ""
     audit = """
 
 SHARED BOUNDARY AGREEMENT AUDIT
@@ -229,7 +316,7 @@ For each shared interface-memory record, exercise the real producer-to-consumer 
     )
     contribution_summary = (ingest_contributions(
         workspace / "coordination_contributions.json", pool,
-        actor="reviewer_agent", event_log=pool_events,
+        actor=review_actor, event_log=pool_events,
     ) if features["codomain"] else {"submitted": 0, "applied": 0, "rejected": 0})
     review_verification = base.verify_solution(workspace)
     review_blocker = observe_dependency(
@@ -256,7 +343,7 @@ For each shared interface-memory record, exercise the real producer-to-consumer 
     late_integration_error = None
     late_reviewer = None
     late_reviewer_error = None
-    if (features["codomain"] and not features["prework"] and integration is None
+    if (features["codomain"] and not features["prework"] and not features.get("selective") and integration is None
             and (workspace / "solution.py").is_file()):
         late_integration, late_integration_error = safe_stage_call(
             workspace, agent_id, run_id + "-late-integration",
@@ -293,7 +380,7 @@ For each shared interface-memory record, exercise the real producer-to-consumer 
     if features["codomain"]:
         audit_contributions = ingest_audit(
             workspace / "interface_audit.json", pool,
-            actor="reviewer_agent", event_log=pool_events,
+            actor=review_actor, event_log=pool_events,
         )
         save_pool(pool_path, pool)
         save_bank(bank_path, bank)
@@ -313,10 +400,11 @@ For each shared interface-memory record, exercise the real producer-to-consumer 
     result = {
         "task_id": task_id, "condition": condition, "features": features, "repetition": repetition,
         "run_id": run_id, "workspace": str(workspace), "model": base.MODEL,
+        "coordination_participants": participant_registry,
         "objective": review_verification,
         "task_scores": {**scores, "mean": sum(scores.values()) / 4, "percentage": sum(scores.values()) * 5},
         "score_valid": score_valid, "required_artifacts": required,
-        "workflow_complete": all(required.values()),
+        "workflow_complete": all(required.values()) and prework_contract_valid,
         "dependency_memory": {
             "implementer_blocker": impl_blocker.to_dict() if impl_blocker else None,
             "reviewer_blocker": review_blocker.to_dict() if review_blocker else None,
@@ -325,7 +413,10 @@ For each shared interface-memory record, exercise the real producer-to-consumer 
             "injected_chars": len(impl_recovery_text) + len(review_recovery_text),
         },
         "codomain_memory": {**interface_summary, "integration_called": integration is not None,
-                            "mode": "prework_negotiation" if features["prework"] else "posthoc_integration",
+                            "mode": ("boundary_scoped_inline" if features.get("selective") else
+                                     ("prework_v2_real_sessions" if features.get("optimized_prework") else
+                                      ("prework_negotiation" if features["prework"] else "posthoc_integration"))),
+                            "contract_valid": prework_contract_valid,
                             "prework_proposal_called": prework_proposal is not None,
                             "prework_feedback_called": prework_feedback is not None,
                             "prework_contributions": prework_contributions,
