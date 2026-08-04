@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 export type MemoryKind = "dependency" | "codomain" | "testing";
@@ -45,6 +45,7 @@ function score(item: MemoryItem, query: string, sessionKey?: string): number {
 export class MemoryEngine {
   readonly root: string;
   readonly config: Required<Omit<PluginConfig, "storeRoot">>;
+  private readonly writeTails = new Map<MemoryKind, Promise<void>>();
 
   constructor(config: PluginConfig = {}) {
     this.root = resolve(config.storeRoot ?? ".openclaw/multiagent-memory");
@@ -72,7 +73,24 @@ export class MemoryEngine {
   async save(kind: MemoryKind, bank: Bank): Promise<void> {
     const path = this.path(kind);
     await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, JSON.stringify(bank, null, 2) + "\n", "utf8");
+    const temporary = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+    await writeFile(temporary, JSON.stringify(bank, null, 2) + "\n", "utf8");
+    await rename(temporary, path);
+  }
+
+  private async withWriteLock<T>(kind: MemoryKind, operation: () => Promise<T>): Promise<T> {
+    const previous = this.writeTails.get(kind) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolveLock) => { release = resolveLock; });
+    const tail = previous.then(() => current);
+    this.writeTails.set(kind, tail);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.writeTails.get(kind) === tail) this.writeTails.delete(kind);
+    }
   }
 
   async retrieve(kind: MemoryKind, query: string, sessionKey?: string): Promise<MemoryItem[]> {
@@ -90,13 +108,15 @@ export class MemoryEngine {
   }
 
   async upsert(item: Omit<MemoryItem, "updatedAt">): Promise<MemoryItem> {
-    const bank = await this.load(item.kind);
-    const stored = { ...item, updatedAt: new Date().toISOString() };
-    const index = bank.items.findIndex((candidate) => candidate.id === item.id);
-    if (index >= 0) bank.items[index] = stored;
-    else bank.items.push(stored);
-    await this.save(item.kind, bank);
-    return stored;
+    return this.withWriteLock(item.kind, async () => {
+      const bank = await this.load(item.kind);
+      const stored = { ...item, updatedAt: new Date().toISOString() };
+      const index = bank.items.findIndex((candidate) => candidate.id === item.id);
+      if (index >= 0) bank.items[index] = stored;
+      else bank.items.push(stored);
+      await this.save(item.kind, bank);
+      return stored;
+    });
   }
 
   async buildSpawnPacket(task: string, parentSessionKey?: string): Promise<{

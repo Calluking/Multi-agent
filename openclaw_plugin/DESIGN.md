@@ -63,6 +63,10 @@ Child works and may contribute typed memory records
 subagent_ended records a compact episode
 ```
 
+Writes are serialized per memory kind inside the Gateway process and committed
+through temporary-file rename. This prevents parallel Agent contributions from
+interleaving or exposing a partially written JSON bank.
+
 ## Important implementation boundary
 
 Version 0.1 proves the native OpenClaw integration seam. It uses deterministic lexical retrieval and typed JSON persistence. It does **not yet** port the complete benchmark-tested extraction and state machines from `dependency_memory/v4_sparse`; that is the next integration step after runtime validation.
