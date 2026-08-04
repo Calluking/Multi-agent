@@ -79,6 +79,9 @@ export class MemoryEngine {
     const bank = await this.load(kind);
     return bank.items
       .filter((item) => item.kind === kind)
+      // Episodes are retained as learning/audit evidence. They are not team
+      // practices and must not be replayed into every later child prompt.
+      .filter((item) => !(kind === "testing" && item.tags?.includes("episode")))
       .map((item) => ({ item, score: score(item, query, sessionKey) }))
       .filter((entry) => entry.score > 0 || kind === "testing")
       .sort((a, b) => b.score - a.score || b.item.updatedAt.localeCompare(a.item.updatedAt))

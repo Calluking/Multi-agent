@@ -34,6 +34,9 @@ Use a native mixed-capability OpenClaw plugin, not a Skill alone.
 - Scope: team/practice knowledge selected by task semantics.
 - Typical content: rule, invalid substitute, required executable evidence, learned episode.
 - Inject-only: it does not add retries or rerouting.
+- Execution episodes remain in the bank for later consolidation/audit, but are
+  excluded from direct prompt retrieval so history does not grow the child
+  prompt on every run.
 
 ## Spawn flow
 
