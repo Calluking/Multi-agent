@@ -23,13 +23,13 @@ Status values: `DONE`, `PARTIAL`, `TODO`, `BLOCKED`.
 | Assignment and participant registry | PARTIAL | Arbitrary assignment IDs and capabilities are retained throughout a run |
 | Sparse assignment-aware retrieval | PARTIAL | Only relevant private records and shared boundary contracts reach each agent |
 | Spawn/completion episode correlation | DONE | Injection IDs correlate with real child session keys and outcomes |
-| Deterministic artifact observer | PARTIAL | File and command-result observation work; incomplete-turn and lifecycle outcome projection remain |
-| Dependency state reconciler | PARTIAL | Missing → blocked, existing → produced, matching command success → verified, and edits → stale work; ready remains gated work |
+| Deterministic artifact observer | DONE | File, command-result, failed/timeout child lifecycle, artifact version, and stale-verification observations are typed and tested |
+| Dependency state reconciler | PARTIAL | Evidence-driven blocked/produced/verified/stale transitions work; project-scoped ready/completion reconciliation remains |
 | Verification ledger | PARTIAL | Exact commands, exit codes, bounded output/error, artifact hashes, attempts, failures, and reruns persist; diagnosis and repair ownership remain |
-| Readiness gate | TODO | Consumers cannot use unresolved or stale prerequisites |
-| Recovery scheduler | TODO | A blocker creates a bounded repair opportunity for a capable owner using a changed strategy |
+| Readiness gate | PARTIAL | Downstream spawn is blocked on unresolved prerequisites while producers remain allowed; active-project isolation remains |
+| Recovery scheduler | PARTIAL | Failed/timeout outcomes create an owned recovery obligation and gate reason; automatic bounded retry admission remains |
 | Same-command re-verification | TODO | A repair resolves a blocker only after the required command passes |
-| Contract negotiation lifecycle | PARTIAL | Proposal, challenge, atomic revision, acceptance, verification, supersession, and stale-version rejection work universally |
+| Contract negotiation lifecycle | DONE | Typed proposal, challenge, revision, acceptance, verification, canonical evolution, and stale-version rejection are tested |
 | Completion gate | TODO | Success is prohibited while required artifacts, contracts, or verification entries remain unresolved |
 | MultiAgentBench adapter | PARTIAL | Fixed workflow maps cleanly into universal assignments and artifacts |
 | CooperBench adapter | PARTIAL | Peer feature ownership and shared artifacts map cleanly without role-name assumptions |
@@ -69,7 +69,7 @@ Do not use intermediate benchmark runs as substitutes for completing the archite
 
 ## Next implementation milestone
 
-Complete lifecycle failure projection, diagnosis, and repair ownership, then build readiness/recovery gates. Artifact existence advances a record only to `produced`; matching successful command evidence advances the same artifact version to `verified`, and later content changes invalidate that evidence.
+Add active project/run isolation before completion gating. The persistent store currently contains records from multiple tasks; readiness, retrieval, recovery, and completion decisions must never consume unresolved state from another project or run.
 
 Current observer evidence:
 
@@ -91,3 +91,21 @@ Verification-ledger evidence:
 - repeated attempts are retained as a bounded ledger;
 - post-verification edits invalidate the successful evidence;
 - `npm test` includes the verification-ledger regression suite.
+
+Readiness and recovery evidence:
+
+- consumer assignments are gated by their explicit `consumerIds` dependencies;
+- producers are never blocked by the artifact they are responsible for producing;
+- produced non-command prerequisites can be consumed;
+- artifacts with a verification command require matching verified evidence;
+- failed and timed-out child outcomes create bounded lifecycle evidence and a recovery owner;
+- child sessions inherit their workspace mapping for command observation.
+
+Contract lifecycle evidence:
+
+- proposal initializes version 1;
+- challenge retains the current version;
+- revision increments the version;
+- acceptance and verification require the exact current base version;
+- stale actions are rejected;
+- lifecycle changes preserve one canonical contract record.

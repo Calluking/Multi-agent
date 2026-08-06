@@ -2,7 +2,7 @@ import { Type } from "typebox";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { MemoryEngine, type MemoryKind, type PluginConfig } from "./memory-engine.js";
+import { MemoryEngine, type ContractAction, type MemoryKind, type PluginConfig } from "./memory-engine.js";
 
 function numericExitCode(value: unknown, depth = 0): number | undefined {
   if (depth > 4 || value === null || typeof value !== "object") return undefined;
@@ -45,6 +45,11 @@ const RecordParameters = Type.Object({
   priority: Type.Optional(Type.Number()),
   version: Type.Optional(Type.Number()),
   evidence: Type.Optional(Type.Array(Type.String())),
+  action: Type.Optional(Type.Union([
+    Type.Literal("propose"), Type.Literal("challenge"), Type.Literal("revise"),
+    Type.Literal("accept"), Type.Literal("verify"),
+  ], { description: "Typed co-domain contract lifecycle action." })),
+  baseVersion: Type.Optional(Type.Number({ description: "Current version being challenged, revised, accepted, or verified." })),
 });
 
 export default definePluginEntry({
@@ -54,8 +59,14 @@ export default definePluginEntry({
   register(api) {
     const config = (api.pluginConfig ?? {}) as PluginConfig;
     const engine = new MemoryEngine(config);
-    const pendingByParent = new Map<string, Array<{ injectionId: string; selected: Record<string, string[]> }>>();
-    const childLedger = new Map<string, { injectionId: string; selected: Record<string, string[]> }>();
+    type PendingInjection = {
+      injectionId: string;
+      selected: Record<string, string[]>;
+      assignment?: string;
+      workspace?: string;
+    };
+    const pendingByParent = new Map<string, PendingInjection[]>();
+    const childLedger = new Map<string, PendingInjection>();
     const initializedRootSessions = new Set<string>();
     const workspaceBySession = new Map<string, string>();
 
@@ -111,14 +122,29 @@ export default definePluginEntry({
       const role = task.toLowerCase().includes("reviewer") ? "reviewer"
         : task.toLowerCase().includes("implementer") ? "implementer"
           : task.toLowerCase().includes("planner") ? "planner" : undefined;
-      if (workspace) await engine.observeWorkflow(workspace, role);
-      const injectionId = `inject:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
       const assignment = typeof (event.params as any).taskName === "string" ? String((event.params as any).taskName)
         : typeof (event.params as any).label === "string" ? String((event.params as any).label) : undefined;
+      const consumerId = assignment ?? role;
+      if (workspace) await engine.observeWorkflow(workspace, consumerId);
+      const blockers = await engine.readinessBlockers(consumerId);
+      if (blockers.length) {
+        const detail = blockers.map((item) =>
+          `${item.id} (${item.lifecycleState ?? item.status ?? "unresolved"}; recovery owner=${item.recoveryOwnerId ?? item.producerIds?.[0] ?? "unassigned"})`).join(", ");
+        return {
+          block: true,
+          blockReason: `Multi-agent readiness gate blocked ${consumerId}: ${detail}. Spawn or resume the recovery owner, produce/verify the prerequisite, then retry this consumer.`,
+        };
+      }
+      const injectionId = `inject:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
       const { packet, selected, role: inferredRole } = await engine.buildSpawnPacket(task, parent, assignment);
       if (!packet) return;
       const queue = pendingByParent.get(parent) ?? [];
-      queue.push({ injectionId, selected: { ...selected, role: inferredRole ? [inferredRole] : [] } });
+      queue.push({
+        injectionId,
+        selected: { ...selected, role: inferredRole ? [inferredRole] : [] },
+        assignment: consumerId,
+        workspace,
+      });
       pendingByParent.set(parent, queue.slice(-20));
       return { params: { ...event.params, task: `${task}${packet}\nInjection id: ${injectionId}` } };
     }, { priority: 80, timeoutMs: 10_000 });
@@ -145,13 +171,22 @@ export default definePluginEntry({
       // context, not as parentSessionKey on the event.
       const parent = ctx.requesterSessionKey ?? event.requesterSessionKey ?? "unknown-parent";
       const pending = pendingByParent.get(parent)?.shift();
-      if (pending && event.childSessionKey) childLedger.set(event.childSessionKey, pending);
+      if (pending && event.childSessionKey) {
+        childLedger.set(event.childSessionKey, pending);
+        if (pending.workspace) workspaceBySession.set(event.childSessionKey, pending.workspace);
+      }
     });
 
     api.on("subagent_ended", async (event: any) => {
       const childKey = event.targetSessionKey;
       const record = childKey ? childLedger.get(childKey) : undefined;
       if (!record) return;
+      await engine.recordLifecycleOutcome({
+        selectedIds: record.selected.dependency ?? [],
+        assignment: record.assignment,
+        outcome: event.outcome ?? event.reason ?? "unknown",
+        error: event.error,
+      });
       await engine.upsert({
         id: `episode:${record.injectionId}`,
         kind: "testing",
@@ -165,6 +200,7 @@ export default definePluginEntry({
         tags: ["subagent", "episode"],
       });
       childLedger.delete(childKey);
+      if (childKey) workspaceBySession.delete(childKey);
     });
 
     api.registerTool({
@@ -180,8 +216,9 @@ export default definePluginEntry({
           projectId?: string; artifactIds?: string[]; interfaceId?: string; subject?: string;
           producerIds?: string[]; consumerIds?: string[]; verificationSubject?: string;
           verificationCommand?: string;
+          action?: ContractAction; baseVersion?: number;
         };
-        const stored = await engine.upsert({
+        const memory = {
           id: params.id,
           kind: params.kind as MemoryKind,
           scope: params.scope,
@@ -202,7 +239,10 @@ export default definePluginEntry({
           priority: params.priority,
           version: params.version,
           evidence: params.evidence,
-        });
+        };
+        const stored = params.action
+          ? await engine.applyContractAction(memory, params.action, params.baseVersion)
+          : await engine.upsert(memory);
         return { content: [{ type: "text", text: `Stored ${stored.kind} memory ${stored.id}.` }], details: stored };
       },
     });

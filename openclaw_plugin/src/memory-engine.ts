@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 
 export type MemoryKind = "dependency" | "codomain" | "testing";
+export type ContractAction = "propose" | "challenge" | "revise" | "accept" | "verify";
 
 export type PluginConfig = {
   storeRoot?: string;
@@ -34,11 +35,20 @@ export type MemoryItem = {
   lifecycleState?: "planned" | "in_progress" | "blocked" | "produced" | "verified" | "ready";
   artifactObservations?: ArtifactObservation[];
   verificationAttempts?: VerificationAttempt[];
+  recoveryOwnerId?: string;
+  lifecycleOutcomes?: LifecycleOutcome[];
   priority?: number;
   version?: number;
   status?: string;
   evidence?: string[];
   updatedAt: string;
+};
+
+export type LifecycleOutcome = {
+  assignment?: string;
+  outcome: string;
+  observedAt: string;
+  error?: string;
 };
 
 export type VerificationAttempt = {
@@ -266,6 +276,28 @@ export class MemoryEngine {
     });
   }
 
+  async applyContractAction(item: Omit<MemoryItem, "updatedAt">, action: ContractAction,
+                            baseVersion?: number): Promise<MemoryItem> {
+    if (item.kind !== "codomain") throw new Error("contract actions require kind=codomain");
+    const bank = await this.load("codomain");
+    const existing = bank.items.find((candidate) => candidate.id === item.id
+      || canonicalKey(candidate) === canonicalKey({ ...item, updatedAt: "" }));
+    if (action === "propose") {
+      if (existing) throw new Error(`contract already exists as ${existing.id} version ${existing.version ?? 1}`);
+      return this.upsert({ ...item, version: 1, status: "proposed" });
+    }
+    if (!existing) throw new Error(`cannot ${action} a missing contract`);
+    const currentVersion = existing.version ?? 1;
+    if (baseVersion !== currentVersion) {
+      throw new Error(`stale contract update: baseVersion=${baseVersion ?? "missing"}, current=${currentVersion}`);
+    }
+    const status = action === "challenge" ? "challenged"
+      : action === "revise" ? "proposed"
+        : action === "accept" ? "agreed" : "verified";
+    const version = action === "revise" ? currentVersion + 1 : currentVersion;
+    return this.upsert({ ...existing, ...definedFields(item), id: existing.id, version, status });
+  }
+
   async initializeFromTask(taskText: string): Promise<void> {
     if (await this.initializeFromCooperativeAssignments(taskText)) return;
     const project = taskText.match(/called\s+([A-Za-z][A-Za-z0-9_-]+)/i)?.[1] ?? "task";
@@ -274,6 +306,7 @@ export class MemoryEngine {
       await this.upsert({
         id: `${project}:plan-artifact`, kind: "dependency", scope: "private",
         projectId: project, artifactIds: ["plan.md"], subject: "plan-artifact-readiness",
+        producerIds: ["planner"], consumerIds: ["implementer"],
         title: `${project} planning target`, targetRoles: ["planner", "implementer"], priority: 100,
         text: "Required before=implementation; Required state=plan.md exists and reflects TASK.md; Observed=missing; Evidence=workspace file check; Blocker=plan.md absent; Next action=write and inspect plan.md",
         status: "unresolved", evidence: [], tags: [project, "artifact", "plan.md"],
@@ -282,6 +315,7 @@ export class MemoryEngine {
         id: `${project}:implementation-artifacts`, kind: "dependency", scope: "private",
         projectId: project, artifactIds: ["solution.py", "implementation.md"], subject: "implementation-artifact-readiness",
         verificationCommand: "python3 solution.py",
+        producerIds: ["implementer"], consumerIds: ["reviewer"],
         title: `${project} implementation target`, targetRoles: ["implementer", "reviewer"], priority: 100,
         text: "Required before=review; Required state=solution.py and implementation.md exist; Observed=missing; Evidence=workspace file check and executable command; Blocker=implementation artifacts absent; Next action=implement the complete TASK.md scope and run its primary verification",
         status: "unresolved", evidence: [], tags: [project, "artifact", "solution.py", "implementation.md"],
@@ -289,6 +323,7 @@ export class MemoryEngine {
       await this.upsert({
         id: `${project}:review-artifact`, kind: "dependency", scope: "private",
         projectId: project, artifactIds: ["review.md"], subject: "review-artifact-readiness",
+        producerIds: ["reviewer"], consumerIds: ["completion"],
         title: `${project} verification target`, targetRoles: ["reviewer"], priority: 100,
         text: "Required before=completion; Required state=review.md records an independently executed command, exit status, and result; Observed=missing; Evidence=workspace file check; Blocker=review evidence absent; Next action=run independent verification, repair material failures, and record exact evidence",
         status: "unresolved", evidence: [], tags: [project, "artifact", "review.md", "verification"],
@@ -356,6 +391,7 @@ export class MemoryEngine {
         await this.upsert({
           id: `${taskTag}:assignment:${assignment.id}`, kind: "dependency", scope: "private",
           projectId: project, artifactIds: assignment.files, subject: `assignment:${assignment.id}:handoff`,
+          producerIds: [assignment.id], consumerIds: ["coordinator"],
           title: `${assignment.id} deliverable state`, targetRoles: [assignment.id], priority: 90,
           text: `Required before=assignment handoff; Required state=${assignment.title} implemented in ${assignment.files.join(", ") || "assigned artifact"}; Observed=missing; Evidence=patch and assignment tests; Blocker=assigned feature not yet evidenced; Next action=implement only ${assignment.id}, preserve partner-owned semantics, and report changed API/artifact plus test evidence`,
           status: "unresolved", evidence: [], tags: [taskTag, `assignment:${assignment.id}`, ...assignment.files],
@@ -466,6 +502,40 @@ export class MemoryEngine {
     return updated;
   }
 
+  async readinessBlockers(consumerId?: string): Promise<MemoryItem[]> {
+    if (!consumerId) return [];
+    const consumer = normalizeIdentity(consumerId);
+    const dependency = await this.load("dependency");
+    return dependency.items.filter((item) => normalizedSet(item.consumerIds).includes(consumer))
+      .filter((item) => item.verificationCommand
+        ? item.lifecycleState !== "verified" && item.lifecycleState !== "ready"
+        : !["produced", "verified", "ready"].includes(item.lifecycleState ?? ""));
+  }
+
+  async recordLifecycleOutcome(input: {
+    selectedIds: string[]; assignment?: string; outcome: string; error?: string;
+  }): Promise<void> {
+    if (input.outcome === "ok") return;
+    const dependency = await this.load("dependency");
+    for (const item of dependency.items.filter((candidate) => input.selectedIds.includes(candidate.id))) {
+      const outcome: LifecycleOutcome = {
+        assignment: input.assignment,
+        outcome: input.outcome,
+        observedAt: new Date().toISOString(),
+        error: input.error?.slice(0, 2000),
+      };
+      await this.upsert({
+        ...item,
+        lifecycleState: "blocked",
+        status: "unresolved",
+        recoveryOwnerId: input.assignment ?? item.producerIds?.[0],
+        lifecycleOutcomes: [...(item.lifecycleOutcomes ?? []), outcome].slice(-20),
+        evidence: [...(item.evidence ?? []),
+          `agent outcome=${input.outcome}; assignment=${input.assignment ?? "unknown"}; error=${input.error ?? "none"}`].slice(-20),
+      });
+    }
+  }
+
   private async observeArtifact(workspace: string, artifactId: string, source: string): Promise<ArtifactObservation> {
     const root = resolve(workspace);
     const path = resolve(root, artifactId);
@@ -509,7 +579,12 @@ export class MemoryEngine {
       const items = await this.retrieve(kind, task, parentSessionKey, role);
       selected[kind] = items.map((item) => item.id);
       if (!items.length) continue;
-      sections.push([heading, ...items.map((item) => `- [${item.id}] ${item.title}: ${item.text}`)].join("\n"));
+      sections.push([heading, ...items.map((item) => {
+        const control = item.kind === "dependency"
+          ? ` [state=${item.lifecycleState ?? item.status ?? "unknown"}; recovery_owner=${item.recoveryOwnerId ?? "none"}; latest_evidence=${item.evidence?.at(-1) ?? "none"}]`
+          : "";
+        return `- [${item.id}] ${item.title}${control}: ${item.text}`;
+      })].join("\n"));
     }
     if (!sections.length) return { packet: "", selected, role };
     return {
