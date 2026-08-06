@@ -1,4 +1,5 @@
-import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 
 export type MemoryKind = "dependency" | "codomain" | "testing";
@@ -29,11 +30,23 @@ export type MemoryItem = {
   producerIds?: string[];
   consumerIds?: string[];
   verificationSubject?: string;
+  lifecycleState?: "planned" | "in_progress" | "blocked" | "produced" | "verified" | "ready";
+  artifactObservations?: ArtifactObservation[];
   priority?: number;
   version?: number;
   status?: string;
   evidence?: string[];
   updatedAt: string;
+};
+
+export type ArtifactObservation = {
+  artifactId: string;
+  exists: boolean;
+  size?: number;
+  modifiedAt?: string;
+  sha256?: string;
+  observedAt: string;
+  source: string;
 };
 
 export type Bank = { schemaVersion: "0.1"; items: MemoryItem[] };
@@ -364,24 +377,60 @@ export class MemoryEngine {
   }
 
   async observeWorkflow(workspace: string, nextRole?: string): Promise<void> {
-    const exists = async (name: string) => access(resolve(workspace, name)).then(() => true).catch(() => false);
     const dependency = await this.load("dependency");
     for (const item of dependency.items) {
       if (!isRelevantToRole(item, nextRole)) continue;
-      const wanted = (item.tags ?? []).filter((tag) => /\.(md|py)$/i.test(tag));
+      const wanted = item.artifactIds?.length
+        ? item.artifactIds
+        : (item.tags ?? []).filter((tag) => /\.(md|py)$/i.test(tag));
       if (!wanted.length) continue;
-      const checks = await Promise.all(wanted.map(async (name) => [name, await exists(name)] as const));
-      const missing = checks.filter(([, present]) => !present).map(([name]) => name);
-      const observed = checks.map(([name, present]) => `${name}=${present ? "present" : "missing"}`);
+      const observations = await Promise.all(wanted.map((name) => this.observeArtifact(workspace, name, "before-spawn")));
+      const missing = observations.filter((entry) => !entry.exists).map((entry) => entry.artifactId);
+      const changedAfterVerification = item.lifecycleState === "verified" || item.lifecycleState === "ready"
+        ? observations.some((entry) => {
+          const prior = item.artifactObservations?.find((old) => old.artifactId === entry.artifactId && old.exists);
+          return Boolean(prior?.sha256 && entry.sha256 && prior.sha256 !== entry.sha256);
+        })
+        : false;
+      const lifecycleState = missing.length ? "blocked" : changedAfterVerification ? "produced"
+        : item.lifecycleState === "verified" || item.lifecycleState === "ready" ? item.lifecycleState : "produced";
+      const observed = observations.map((entry) => `${entry.artifactId}=${entry.exists ? `produced@${entry.sha256}` : "missing"}`);
       await this.upsert({
         ...item,
-        status: missing.length ? "unresolved" : "verified",
+        status: missing.length ? "unresolved" : changedAfterVerification ? "stale" : item.status,
+        lifecycleState,
+        artifactObservations: observations,
         text: item.text
           .replace(/Observed=[^;]*/i, `Observed=${missing.length ? "missing" : "present"}`)
           .replace(/Evidence=[^;]*/i, `Evidence=${observed.join(", ")}`)
-          .replace(/Blocker=[^;]*/i, `Blocker=${missing.length ? `${missing.join(", ")} absent` : "null"}`),
+          .replace(/Blocker=[^;]*/i, `Blocker=${missing.length ? `${missing.join(", ")} absent` : changedAfterVerification ? "artifact changed after verification" : "null"}`),
         evidence: observed,
       });
+    }
+  }
+
+  private async observeArtifact(workspace: string, artifactId: string, source: string): Promise<ArtifactObservation> {
+    const root = resolve(workspace);
+    const path = resolve(root, artifactId);
+    const observedAt = new Date().toISOString();
+    if (path !== root && !path.startsWith(root + "/")) {
+      return { artifactId, exists: false, observedAt, source: `${source}:outside-workspace` };
+    }
+    try {
+      const metadata = await stat(path);
+      if (!metadata.isFile()) return { artifactId, exists: false, observedAt, source: `${source}:not-file` };
+      const content = await readFile(path);
+      return {
+        artifactId,
+        exists: true,
+        size: metadata.size,
+        modifiedAt: metadata.mtime.toISOString(),
+        sha256: createHash("sha256").update(content).digest("hex"),
+        observedAt,
+        source,
+      };
+    } catch {
+      return { artifactId, exists: false, observedAt, source };
     }
   }
 

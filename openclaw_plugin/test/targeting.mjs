@@ -38,7 +38,10 @@ try {
     await writeFile(join(workspace, "plan.md"), "plan");
     await auto.observeWorkflow(workspace, "planner");
     const planBank = await auto.load("dependency");
-    if (planBank.items.find((item) => item.id.endsWith("plan-artifact"))?.status !== "verified") throw new Error("workspace observation failed");
+    const planState = planBank.items.find((item) => item.id.endsWith("plan-artifact"));
+    if (planState?.lifecycleState !== "produced" || planState.status === "verified") {
+      throw new Error("workspace observation incorrectly treated existence as verification");
+    }
   } finally {
     await rm(autoRoot, { recursive: true, force: true });
   }

@@ -19,12 +19,12 @@ Status values: `DONE`, `PARTIAL`, `TODO`, `BLOCKED`.
 
 | Milestone | Status | Acceptance condition |
 |---|---|---|
-| Structured canonical identity | PARTIAL | Implementation and tests pass; CooperBench rerun must confirm the observed duplicate is eliminated |
+| Structured canonical identity | DONE | Structured keys, legacy fallback, partial-update preservation, generated-record identity, and regression tests pass |
 | Assignment and participant registry | PARTIAL | Arbitrary assignment IDs and capabilities are retained throughout a run |
 | Sparse assignment-aware retrieval | PARTIAL | Only relevant private records and shared boundary contracts reach each agent |
 | Spawn/completion episode correlation | DONE | Injection IDs correlate with real child session keys and outcomes |
-| Deterministic artifact observer | TODO | File state, version, tool result, exit code, incomplete turn, and stale verification become typed observations |
-| Dependency state reconciler | TODO | Planned → in progress → produced → verified → ready transitions are evidence-driven |
+| Deterministic artifact observer | PARTIAL | File existence, size, mtime, SHA-256 version, workspace confinement, and stale-verification detection are implemented; tool/command observations remain |
+| Dependency state reconciler | PARTIAL | Missing → blocked and existing → produced work; verified/ready require the upcoming verification ledger |
 | Verification ledger | TODO | Exact command, artifact version, result, diagnosis, owner, repair, and rerun are persisted |
 | Readiness gate | TODO | Consumers cannot use unresolved or stale prerequisites |
 | Recovery scheduler | TODO | A blocker creates a bounded repair opportunity for a capable owner using a changed strategy |
@@ -54,12 +54,29 @@ Evidence:
 - plugin-generated MultiAgentBench and cooperative-assignment records now carry structured identity;
 - `npm test` passes concurrency, deduplication, targeting, and co-domain filtering tests.
 
+## Development and benchmark order
+
+Complete the plugin before using benchmarks for final validation:
+
+1. Implement and locally test every universal control-plane milestone.
+2. Run plugin unit tests and native OpenClaw integration validation.
+3. Freeze the plugin implementation for evaluation.
+4. Run CooperBench to validate arbitrary peer assignments and shared-artifact composition.
+5. Run MultiAgentBench to validate dependency recovery, contract use, testing evidence, and workflow completion.
+6. Compare plugin/no-plugin conditions only after the implementation is complete.
+
+Do not use intermediate benchmark runs as substitutes for completing the architecture.
+
 ## Next implementation milestone
 
-Finish validation of structured canonical identity before moving to the deterministic observer:
+Complete command/tool observation and the verification ledger. Artifact existence now advances a record only to `produced`; matching successful command evidence must advance the same artifact version to `verified`, and any later content hash change must invalidate that evidence.
 
-1. Rebuild/reload the plugin in OpenClaw.
-2. Rerun the CooperBench one-task probe in a fresh bank.
-3. Confirm exactly one canonical shared `Encoding.encode` contract remains.
-4. Mark this milestone `DONE` only after that runtime evidence.
-5. Begin the deterministic artifact observer milestone.
+Current observer evidence:
+
+- missing required files become `blocked`;
+- existing files become `produced`, never implicitly `verified`;
+- observations retain size, modification time, SHA-256, timestamp, and source;
+- paths outside the workspace are rejected;
+- unchanged verified artifacts retain verification;
+- content changes move verified artifacts back to `produced` with status `stale`;
+- `npm test` includes the artifact-observer regression suite.
