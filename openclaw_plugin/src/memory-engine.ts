@@ -25,6 +25,7 @@ export type MemoryItem = {
   targetRoles?: string[];
   participants?: string[];
   projectId?: string;
+  runId?: string;
   artifactIds?: string[];
   interfaceId?: string;
   subject?: string;
@@ -147,17 +148,18 @@ function definedFields<T extends object>(value: T): Partial<T> {
 
 export function canonicalKey(item: MemoryItem): string {
   const project = normalizeIdentity(item.projectId ?? "");
+  const run = normalizeIdentity(item.runId ?? "");
   const owner = item.scope === "private" ? normalizeIdentity(item.ownerSessionKey ?? "") : "shared";
   const artifacts = normalizedSet(item.artifactIds).join("|");
   if (project) {
     if (item.kind === "dependency" && (item.subject || artifacts)) {
-      return ["v1", item.kind, project, normalizeIdentity(item.subject ?? ""), artifacts, owner].join("::");
+      return ["v1", item.kind, project, run, normalizeIdentity(item.subject ?? ""), artifacts, owner].join("::");
     }
     if (item.kind === "codomain" && (item.interfaceId || artifacts)) {
-      return ["v1", item.kind, project, normalizeIdentity(item.interfaceId ?? ""), artifacts, owner].join("::");
+      return ["v1", item.kind, project, run, normalizeIdentity(item.interfaceId ?? ""), artifacts, owner].join("::");
     }
     if (item.kind === "testing" && item.verificationSubject) {
-      return ["v1", item.kind, project, normalizeIdentity(item.verificationSubject),
+      return ["v1", item.kind, project, run, normalizeIdentity(item.verificationSubject),
         normalizedSet(item.targetRoles).join("|"), owner].join("::");
     }
   }
@@ -176,6 +178,24 @@ export function canonicalKey(item: MemoryItem): string {
     roles.join("|"),
     item.ownerSessionKey ?? "",
   ].join("::");
+}
+
+export function inferProjectId(taskText: string): string {
+  const explicit = taskText.match(/\[Project\s+([^\]]+)\]/i)?.[1]?.trim()
+    ?? taskText.match(/called\s+([A-Za-z][A-Za-z0-9_-]+)/i)?.[1]?.trim();
+  if (explicit) return explicit;
+  return `task-${createHash("sha256").update(taskText.trim()).digest("hex").slice(0, 12)}`;
+}
+
+function inContext(item: MemoryItem, projectId?: string, runId?: string): boolean {
+  if (projectId && item.projectId && normalizeIdentity(item.projectId) !== normalizeIdentity(projectId)) return false;
+  if (runId && item.runId && normalizeIdentity(item.runId) !== normalizeIdentity(runId)) return false;
+  return true;
+}
+
+function sameRecordContext(left: MemoryItem, right: Pick<MemoryItem, "projectId" | "runId">): boolean {
+  return normalizeIdentity(left.projectId ?? "") === normalizeIdentity(right.projectId ?? "")
+    && normalizeIdentity(left.runId ?? "") === normalizeIdentity(right.runId ?? "");
 }
 
 export class MemoryEngine {
@@ -230,10 +250,12 @@ export class MemoryEngine {
     }
   }
 
-  async retrieve(kind: MemoryKind, query: string, sessionKey?: string, role = inferRole(query)): Promise<MemoryItem[]> {
+  async retrieve(kind: MemoryKind, query: string, sessionKey?: string, role = inferRole(query),
+                 projectId?: string, runId?: string): Promise<MemoryItem[]> {
     const bank = await this.load(kind);
     return bank.items
       .filter((item) => item.kind === kind)
+      .filter((item) => inContext(item, projectId, runId))
       .filter(isCurrent)
       .filter((item) => isRelevantToRole(item, role))
       .filter((item) => kind !== "codomain" || isProductCodomain(item))
@@ -255,7 +277,12 @@ export class MemoryEngine {
     return this.withWriteLock(item.kind, async () => {
       const bank = await this.load(item.kind);
       const stored = { ...item, updatedAt: new Date().toISOString() };
-      const exactIndex = bank.items.findIndex((candidate) => candidate.id === item.id);
+      const matchingIds = bank.items
+        .map((candidate, index) => ({ candidate, index }))
+        .filter(({ candidate }) => candidate.id === item.id);
+      const exactIndex = item.projectId === undefined && item.runId === undefined && matchingIds.length === 1
+        ? matchingIds[0].index
+        : matchingIds.find(({ candidate }) => sameRecordContext(candidate, item))?.index ?? -1;
       if (exactIndex >= 0) {
         bank.items[exactIndex] = { ...bank.items[exactIndex], ...definedFields(stored) };
         await this.save(item.kind, bank);
@@ -280,7 +307,7 @@ export class MemoryEngine {
                             baseVersion?: number): Promise<MemoryItem> {
     if (item.kind !== "codomain") throw new Error("contract actions require kind=codomain");
     const bank = await this.load("codomain");
-    const existing = bank.items.find((candidate) => candidate.id === item.id
+    const existing = bank.items.find((candidate) => candidate.id === item.id && sameRecordContext(candidate, item)
       || canonicalKey(candidate) === canonicalKey({ ...item, updatedAt: "" }));
     if (action === "propose") {
       if (existing) throw new Error(`contract already exists as ${existing.id} version ${existing.version ?? 1}`);
@@ -298,22 +325,26 @@ export class MemoryEngine {
     return this.upsert({ ...existing, ...definedFields(item), id: existing.id, version, status });
   }
 
-  async initializeFromTask(taskText: string): Promise<void> {
-    if (await this.initializeFromCooperativeAssignments(taskText)) return;
-    const project = taskText.match(/called\s+([A-Za-z][A-Za-z0-9_-]+)/i)?.[1] ?? "task";
-    const empty = async (kind: MemoryKind) => (await this.load(kind)).items.length === 0;
+  async initializeFromTask(taskText: string, runId?: string): Promise<string> {
+    const project = inferProjectId(taskText);
+    const prefix = runId
+      ? `${project}:run:${createHash("sha256").update(runId).digest("hex").slice(0, 10)}`
+      : project;
+    if (await this.initializeFromCooperativeAssignments(taskText, project, runId)) return project;
+    const empty = async (kind: MemoryKind) => !(await this.load(kind)).items
+      .some((item) => item.kind === kind && inContext(item, project, runId) && item.projectId);
     if (this.config.dependencyEnabled && await empty("dependency")) {
       await this.upsert({
-        id: `${project}:plan-artifact`, kind: "dependency", scope: "private",
-        projectId: project, artifactIds: ["plan.md"], subject: "plan-artifact-readiness",
+        id: `${prefix}:plan-artifact`, kind: "dependency", scope: "private",
+        projectId: project, runId, artifactIds: ["plan.md"], subject: "plan-artifact-readiness",
         producerIds: ["planner"], consumerIds: ["implementer"],
         title: `${project} planning target`, targetRoles: ["planner", "implementer"], priority: 100,
         text: "Required before=implementation; Required state=plan.md exists and reflects TASK.md; Observed=missing; Evidence=workspace file check; Blocker=plan.md absent; Next action=write and inspect plan.md",
         status: "unresolved", evidence: [], tags: [project, "artifact", "plan.md"],
       });
       await this.upsert({
-        id: `${project}:implementation-artifacts`, kind: "dependency", scope: "private",
-        projectId: project, artifactIds: ["solution.py", "implementation.md"], subject: "implementation-artifact-readiness",
+        id: `${prefix}:implementation-artifacts`, kind: "dependency", scope: "private",
+        projectId: project, runId, artifactIds: ["solution.py", "implementation.md"], subject: "implementation-artifact-readiness",
         verificationCommand: "python3 solution.py",
         producerIds: ["implementer"], consumerIds: ["reviewer"],
         title: `${project} implementation target`, targetRoles: ["implementer", "reviewer"], priority: 100,
@@ -321,8 +352,8 @@ export class MemoryEngine {
         status: "unresolved", evidence: [], tags: [project, "artifact", "solution.py", "implementation.md"],
       });
       await this.upsert({
-        id: `${project}:review-artifact`, kind: "dependency", scope: "private",
-        projectId: project, artifactIds: ["review.md"], subject: "review-artifact-readiness",
+        id: `${prefix}:review-artifact`, kind: "dependency", scope: "private",
+        projectId: project, runId, artifactIds: ["review.md"], subject: "review-artifact-readiness",
         producerIds: ["reviewer"], consumerIds: ["completion"],
         title: `${project} verification target`, targetRoles: ["reviewer"], priority: 100,
         text: "Required before=completion; Required state=review.md records an independently executed command, exit status, and result; Observed=missing; Evidence=workspace file check; Blocker=review evidence absent; Next action=run independent verification, repair material failures, and record exact evidence",
@@ -331,15 +362,15 @@ export class MemoryEngine {
     }
     if (this.config.testingEnabled && await empty("testing")) {
       await this.upsert({
-        id: `${project}:implementer-verification-practice`, kind: "testing", scope: "shared",
-        projectId: project, verificationSubject: "implementation-public-interface",
+        id: `${prefix}:implementer-verification-practice`, kind: "testing", scope: "shared",
+        projectId: project, runId, verificationSubject: "implementation-public-interface",
         title: "Incremental public-interface verification", targetRoles: ["implementer"], priority: 80,
         text: "Responsibility=implementer; Trigger=multi-stage implementation or explicit ordering; Command=run executable checks after each implemented slice and the primary end-to-end path; Pass evidence=exit 0 plus assertions on observable public behavior; Failure action=diagnose and revise before handoff",
         status: "required", evidence: [], tags: [project, "role:implementer", "verification", "end-to-end"],
       });
       await this.upsert({
-        id: `${project}:reviewer-verification-practice`, kind: "testing", scope: "shared",
-        projectId: project, verificationSubject: "independent-boundary-verification",
+        id: `${prefix}:reviewer-verification-practice`, kind: "testing", scope: "shared",
+        projectId: project, runId, verificationSubject: "independent-boundary-verification",
         title: "Independent boundary and negative verification", targetRoles: ["reviewer"], priority: 90,
         text: "Responsibility=reviewer; Trigger=review or executable verification; Command=run the documented entrypoint and independent happy-path, invalid-input, ordering, and cross-boundary checks; Pass evidence=exact command, exit status, assertion counts, and observed result; Failure action=repair material failures and rerun before approval",
         status: "required", evidence: [], tags: [project, "role:reviewer", "verification", "boundary"],
@@ -350,8 +381,8 @@ export class MemoryEngine {
     if (this.config.codomainEnabled && await empty("codomain")
       && /registration|profile/i.test(taskText) && /feedback|rating|review/i.test(taskText)) {
       await this.upsert({
-        id: `${project}:experience-feedback-contract`, kind: "codomain", scope: "shared",
-        projectId: project, interfaceId: "experience-to-feedback", artifactIds: ["feedback-api"],
+        id: `${prefix}:experience-feedback-contract`, kind: "codomain", scope: "shared",
+        projectId: project, runId, interfaceId: "experience-to-feedback", artifactIds: ["feedback-api"],
         producerIds: ["experience modules"], consumerIds: ["feedback and rating module"],
         title: "Experience modules to feedback boundary", targetRoles: ["implementer", "reviewer"],
         participants: ["experience modules", "feedback and rating module"], priority: 85, version: 1,
@@ -359,8 +390,8 @@ export class MemoryEngine {
         status: "agreed", evidence: [], tags: [project, "feedback", "rating", "boundary"],
       });
       await this.upsert({
-        id: `${project}:identity-feature-contract`, kind: "codomain", scope: "shared",
-        projectId: project, interfaceId: "identity-to-protected-features", artifactIds: ["registered-user-identity"],
+        id: `${prefix}:identity-feature-contract`, kind: "codomain", scope: "shared",
+        projectId: project, runId, interfaceId: "identity-to-protected-features", artifactIds: ["registered-user-identity"],
         producerIds: ["registration and profile module"], consumerIds: ["tour language and workshop modules"],
         title: "Registration identity to protected features", targetRoles: ["implementer", "reviewer"],
         participants: ["registration and profile module", "tour language and workshop modules"], priority: 80, version: 1,
@@ -368,12 +399,13 @@ export class MemoryEngine {
         status: "agreed", evidence: [], tags: [project, "registration", "profile", "boundary"],
       });
     }
+    return project;
   }
 
-  private async initializeFromCooperativeAssignments(taskText: string): Promise<boolean> {
+  private async initializeFromCooperativeAssignments(taskText: string, project: string,
+                                                      runId?: string): Promise<boolean> {
     const matches = [...taskText.matchAll(/\[Assignment\s+([^\]]+)\]([\s\S]*?)(?=\n\[Assignment\s+|$)/gi)];
     if (matches.length < 2) return false;
-    const project = taskText.match(/\[Project\s+([^\]]+)\]/i)?.[1]?.trim() ?? "cooperative-task";
     const assignments = matches.map((match) => {
       const id = match[1].trim();
       const body = match[2].trim();
@@ -384,13 +416,14 @@ export class MemoryEngine {
       return { id, body, title, files: [...new Set(files)] };
     });
     const sharedFiles = assignments[0].files.filter((file) => assignments.slice(1).some((item) => item.files.includes(file)));
-    const taskTag = `project:${project.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+    const taskTag = `project:${project.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
+      + (runId ? `:run:${createHash("sha256").update(runId).digest("hex").slice(0, 10)}` : "");
 
     if (this.config.dependencyEnabled) {
       for (const assignment of assignments) {
         await this.upsert({
           id: `${taskTag}:assignment:${assignment.id}`, kind: "dependency", scope: "private",
-          projectId: project, artifactIds: assignment.files, subject: `assignment:${assignment.id}:handoff`,
+          projectId: project, runId, artifactIds: assignment.files, subject: `assignment:${assignment.id}:handoff`,
           producerIds: [assignment.id], consumerIds: ["coordinator"],
           title: `${assignment.id} deliverable state`, targetRoles: [assignment.id], priority: 90,
           text: `Required before=assignment handoff; Required state=${assignment.title} implemented in ${assignment.files.join(", ") || "assigned artifact"}; Observed=missing; Evidence=patch and assignment tests; Blocker=assigned feature not yet evidenced; Next action=implement only ${assignment.id}, preserve partner-owned semantics, and report changed API/artifact plus test evidence`,
@@ -402,7 +435,7 @@ export class MemoryEngine {
       const left = assignments[0], right = assignments[1];
       await this.upsert({
         id: `${taskTag}:shared-artifact:${sharedFiles.join("+")}`, kind: "codomain", scope: "shared",
-        projectId: project, artifactIds: sharedFiles,
+        projectId: project, runId, artifactIds: sharedFiles,
         interfaceId: `shared-artifact:${sharedFiles.join("+")}`,
         producerIds: [left.id], consumerIds: [right.id],
         title: `Shared contract for ${sharedFiles.join(", ")}`, targetRoles: assignments.map((item) => item.id),
@@ -415,7 +448,7 @@ export class MemoryEngine {
       for (const assignment of assignments) {
         await this.upsert({
           id: `${taskTag}:testing:${assignment.id}`, kind: "testing", scope: "shared",
-          projectId: project, artifactIds: sharedFiles,
+          projectId: project, runId, artifactIds: sharedFiles,
           verificationSubject: `assignment:${assignment.id}:composition`,
           title: `${assignment.id} independent and composition verification`, targetRoles: [assignment.id], priority: 90,
           text: `Responsibility=${assignment.id}; Trigger=shared artifact or API modified by another assignment; Command=run baseline tests, ${assignment.id} feature tests, and a composition check combining both assignments; Pass evidence=exact commands and assertions showing own feature, partner defaults, and joint behavior; Failure action=revise only the conflicting boundary and rerun before handoff`,
@@ -426,9 +459,11 @@ export class MemoryEngine {
     return true;
   }
 
-  async observeWorkflow(workspace: string, nextRole?: string): Promise<void> {
+  async observeWorkflow(workspace: string, nextRole?: string, projectId?: string,
+                        runId?: string): Promise<void> {
     const dependency = await this.load("dependency");
     for (const item of dependency.items) {
+      if (!inContext(item, projectId, runId)) continue;
       if (!isRelevantToRole(item, nextRole)) continue;
       const wanted = item.artifactIds?.length
         ? item.artifactIds
@@ -461,12 +496,14 @@ export class MemoryEngine {
 
   async recordVerification(workspace: string, input: {
     command: string; exitCode: number; source?: string; output?: string; error?: string;
+    projectId?: string; runId?: string;
   }): Promise<number> {
     const command = input.command.trim();
     if (!command) return 0;
     const dependency = await this.load("dependency");
     let updated = 0;
     for (const item of dependency.items) {
+      if (!inContext(item, input.projectId, input.runId)) continue;
       if (!item.verificationCommand
         || normalizeIdentity(item.verificationCommand) !== normalizeIdentity(command)) continue;
       const artifacts = item.artifactIds ?? [];
@@ -502,11 +539,12 @@ export class MemoryEngine {
     return updated;
   }
 
-  async readinessBlockers(consumerId?: string): Promise<MemoryItem[]> {
+  async readinessBlockers(consumerId?: string, projectId?: string, runId?: string): Promise<MemoryItem[]> {
     if (!consumerId) return [];
     const consumer = normalizeIdentity(consumerId);
     const dependency = await this.load("dependency");
-    return dependency.items.filter((item) => normalizedSet(item.consumerIds).includes(consumer))
+    return dependency.items.filter((item) => inContext(item, projectId, runId))
+      .filter((item) => normalizedSet(item.consumerIds).includes(consumer))
       .filter((item) => item.verificationCommand
         ? item.lifecycleState !== "verified" && item.lifecycleState !== "ready"
         : !["produced", "verified", "ready"].includes(item.lifecycleState ?? ""));
@@ -561,7 +599,8 @@ export class MemoryEngine {
     }
   }
 
-  async buildSpawnPacket(task: string, parentSessionKey?: string, assignment?: string): Promise<{
+  async buildSpawnPacket(task: string, parentSessionKey?: string, assignment?: string,
+                         projectId?: string, runId?: string): Promise<{
     packet: string;
     selected: Record<MemoryKind, string[]>;
     role?: string;
@@ -576,7 +615,7 @@ export class MemoryEngine {
     ];
     for (const [kind, isEnabled, heading] of enabled) {
       if (!isEnabled) continue;
-      const items = await this.retrieve(kind, task, parentSessionKey, role);
+      const items = await this.retrieve(kind, task, parentSessionKey, role, projectId, runId);
       selected[kind] = items.map((item) => item.id);
       if (!items.length) continue;
       sections.push([heading, ...items.map((item) => {
@@ -600,11 +639,12 @@ export class MemoryEngine {
     };
   }
 
-  async inspect(query: string, sessionKey?: string): Promise<Record<MemoryKind, MemoryItem[]>> {
+  async inspect(query: string, sessionKey?: string, projectId?: string,
+                runId?: string): Promise<Record<MemoryKind, MemoryItem[]>> {
     return {
-      dependency: await this.retrieve("dependency", query, sessionKey),
-      codomain: await this.retrieve("codomain", query, sessionKey),
-      testing: await this.retrieve("testing", query, sessionKey),
+      dependency: await this.retrieve("dependency", query, sessionKey, undefined, projectId, runId),
+      codomain: await this.retrieve("codomain", query, sessionKey, undefined, projectId, runId),
+      testing: await this.retrieve("testing", query, sessionKey, undefined, projectId, runId),
     };
   }
 }

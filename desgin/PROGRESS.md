@@ -24,9 +24,9 @@ Status values: `DONE`, `PARTIAL`, `TODO`, `BLOCKED`.
 | Sparse assignment-aware retrieval | PARTIAL | Only relevant private records and shared boundary contracts reach each agent |
 | Spawn/completion episode correlation | DONE | Injection IDs correlate with real child session keys and outcomes |
 | Deterministic artifact observer | DONE | File, command-result, failed/timeout child lifecycle, artifact version, and stale-verification observations are typed and tested |
-| Dependency state reconciler | PARTIAL | Evidence-driven blocked/produced/verified/stale transitions work; project-scoped ready/completion reconciliation remains |
+| Dependency state reconciler | PARTIAL | Evidence-driven blocked/produced/verified/stale transitions and project/run isolation work; ready/completion reconciliation remains |
 | Verification ledger | PARTIAL | Exact commands, exit codes, bounded output/error, artifact hashes, attempts, failures, and reruns persist; diagnosis and repair ownership remain |
-| Readiness gate | PARTIAL | Downstream spawn is blocked on unresolved prerequisites while producers remain allowed; active-project isolation remains |
+| Readiness gate | PARTIAL | Downstream spawn is project/run-scoped and blocked on unresolved prerequisites while producers remain allowed; completion gate remains |
 | Recovery scheduler | PARTIAL | Failed/timeout outcomes create an owned recovery obligation and gate reason; automatic bounded retry admission remains |
 | Same-command re-verification | TODO | A repair resolves a blocker only after the required command passes |
 | Contract negotiation lifecycle | DONE | Typed proposal, challenge, revision, acceptance, verification, canonical evolution, and stale-version rejection are tested |
@@ -69,7 +69,7 @@ Do not use intermediate benchmark runs as substitutes for completing the archite
 
 ## Next implementation milestone
 
-Add active project/run isolation before completion gating. The persistent store currently contains records from multiple tasks; readiness, retrieval, recovery, and completion decisions must never consume unresolved state from another project or run.
+Project/run isolation is now implemented. The next step is the universal assignment adapter: normalize arbitrary assignment IDs, owned working directories, artifact paths, producer/consumer participation, and verification commands before enabling completion enforcement.
 
 Current observer evidence:
 
@@ -109,3 +109,14 @@ Contract lifecycle evidence:
 - acceptance and verification require the exact current base version;
 - stale actions are rejected;
 - lifecycle changes preserve one canonical contract record.
+
+Project/run isolation evidence:
+
+- task-local records carry explicit `projectId` and `runId`;
+- canonical keys include both identities;
+- generated IDs include a stable hashed run suffix;
+- repeated runs of one project do not overwrite each other;
+- retrieval, workspace observation, verification, and readiness gates filter by active project/run;
+- other-project and other-run blockers cannot affect the active task;
+- unscoped reusable practices remain retrievable;
+- partial legacy updates remain safe when their ID is unambiguous.

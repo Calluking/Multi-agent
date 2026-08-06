@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node test/concurrency.mjs && node test/deduplication.mjs && node test/artifact-observer.mjs && node test/verification-ledger.mjs && node test/readiness-gate.mjs && node test/contract-lifecycle.mjs && node test/targeting.mjs && node test/codomain-filter.mjs",
+    "test": "npm run build && node test/concurrency.mjs && node test/deduplication.mjs && node test/project-isolation.mjs && node test/artifact-observer.mjs && node test/verification-ledger.mjs && node test/readiness-gate.mjs && node test/contract-lifecycle.mjs && node test/targeting.mjs && node test/codomain-filter.mjs",
     "plugin:build": "npm run build",
     "plugin:validate": "npm run check"
   },

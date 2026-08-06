@@ -35,6 +35,7 @@ const RecordParameters = Type.Object({
   targetRoles: Type.Optional(Type.Array(Type.String(), { description: "Roles that should receive this item, for example implementer or reviewer." })),
   participants: Type.Optional(Type.Array(Type.String(), { description: "Product components/domains that share this contract." })),
   projectId: Type.Optional(Type.String({ description: "Stable project or task identity used for canonicalization." })),
+  runId: Type.Optional(Type.String({ description: "Stable execution/run identity used to isolate task-local state." })),
   artifactIds: Type.Optional(Type.Array(Type.String(), { description: "Stable repository-relative artifact paths or API artifact identities." })),
   interfaceId: Type.Optional(Type.String({ description: "Stable producer-consumer interface identity for co-domain contracts." })),
   subject: Type.Optional(Type.String({ description: "Stable obligation or dependency subject identity." })),
@@ -64,11 +65,15 @@ export default definePluginEntry({
       selected: Record<string, string[]>;
       assignment?: string;
       workspace?: string;
+      projectId?: string;
+      runId?: string;
     };
     const pendingByParent = new Map<string, PendingInjection[]>();
     const childLedger = new Map<string, PendingInjection>();
     const initializedRootSessions = new Set<string>();
     const workspaceBySession = new Map<string, string>();
+    const projectBySession = new Map<string, string>();
+    const runBySession = new Map<string, string>();
 
     if (engine.config.autoInitialize) {
       api.on("before_prompt_build", async (event: any, ctx: any) => {
@@ -81,7 +86,12 @@ export default definePluginEntry({
         if (workspace) {
           try {
             const taskText = await readFile(resolve(workspace, "TASK.md"), "utf8");
-            await engine.initializeFromTask(taskText);
+            const runId = sessionKey || undefined;
+            const projectId = await engine.initializeFromTask(taskText, runId);
+            if (sessionKey) {
+              projectBySession.set(sessionKey, projectId);
+              runBySession.set(sessionKey, sessionKey);
+            }
           } catch {
             // Memory initialization is fail-open; the original task proceeds.
           }
@@ -116,8 +126,11 @@ export default definePluginEntry({
       // before_prompt_build does not expose workspaceDir on every OpenClaw
       // runtime. The first spawn objective is the reliable native seam and
       // normally carries the task/product context prepared by the coordinator.
-      await engine.initializeFromTask(task);
       const parent = ctx.sessionKey ?? "unknown-parent";
+      const runId = runBySession.get(parent) ?? parent;
+      const projectId = await engine.initializeFromTask(task, runId);
+      projectBySession.set(parent, projectId);
+      runBySession.set(parent, runId);
       const workspace = String((ctx as any)?.workspaceDir ?? "");
       const role = task.toLowerCase().includes("reviewer") ? "reviewer"
         : task.toLowerCase().includes("implementer") ? "implementer"
@@ -125,8 +138,8 @@ export default definePluginEntry({
       const assignment = typeof (event.params as any).taskName === "string" ? String((event.params as any).taskName)
         : typeof (event.params as any).label === "string" ? String((event.params as any).label) : undefined;
       const consumerId = assignment ?? role;
-      if (workspace) await engine.observeWorkflow(workspace, consumerId);
-      const blockers = await engine.readinessBlockers(consumerId);
+      if (workspace) await engine.observeWorkflow(workspace, consumerId, projectId, runId);
+      const blockers = await engine.readinessBlockers(consumerId, projectId, runId);
       if (blockers.length) {
         const detail = blockers.map((item) =>
           `${item.id} (${item.lifecycleState ?? item.status ?? "unresolved"}; recovery owner=${item.recoveryOwnerId ?? item.producerIds?.[0] ?? "unassigned"})`).join(", ");
@@ -136,7 +149,8 @@ export default definePluginEntry({
         };
       }
       const injectionId = `inject:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
-      const { packet, selected, role: inferredRole } = await engine.buildSpawnPacket(task, parent, assignment);
+      const { packet, selected, role: inferredRole } = await engine.buildSpawnPacket(
+        task, parent, assignment, projectId, runId);
       if (!packet) return;
       const queue = pendingByParent.get(parent) ?? [];
       queue.push({
@@ -144,6 +158,8 @@ export default definePluginEntry({
         selected: { ...selected, role: inferredRole ? [inferredRole] : [] },
         assignment: consumerId,
         workspace,
+        projectId,
+        runId,
       });
       pendingByParent.set(parent, queue.slice(-20));
       return { params: { ...event.params, task: `${task}${packet}\nInjection id: ${injectionId}` } };
@@ -163,6 +179,8 @@ export default definePluginEntry({
         source: `after-tool-call:${event.toolName}`,
         output: event.result === undefined ? undefined : JSON.stringify(event.result),
         error: event.error,
+        projectId: ctx.sessionKey ? projectBySession.get(ctx.sessionKey) : undefined,
+        runId: ctx.sessionKey ? runBySession.get(ctx.sessionKey) : undefined,
       });
     }, { priority: 80, timeoutMs: 10_000 });
 
@@ -174,6 +192,8 @@ export default definePluginEntry({
       if (pending && event.childSessionKey) {
         childLedger.set(event.childSessionKey, pending);
         if (pending.workspace) workspaceBySession.set(event.childSessionKey, pending.workspace);
+        if (pending.projectId) projectBySession.set(event.childSessionKey, pending.projectId);
+        if (pending.runId) runBySession.set(event.childSessionKey, pending.runId);
       }
     });
 
@@ -201,6 +221,8 @@ export default definePluginEntry({
       });
       childLedger.delete(childKey);
       if (childKey) workspaceBySession.delete(childKey);
+      if (childKey) projectBySession.delete(childKey);
+      if (childKey) runBySession.delete(childKey);
     });
 
     api.registerTool({
@@ -213,7 +235,7 @@ export default definePluginEntry({
           id: string; kind: MemoryKind; scope: "private" | "shared";
           title: string; text: string; status?: string; tags?: string[]; evidence?: string[];
           targetRoles?: string[]; participants?: string[]; priority?: number; version?: number;
-          projectId?: string; artifactIds?: string[]; interfaceId?: string; subject?: string;
+          projectId?: string; runId?: string; artifactIds?: string[]; interfaceId?: string; subject?: string;
           producerIds?: string[]; consumerIds?: string[]; verificationSubject?: string;
           verificationCommand?: string;
           action?: ContractAction; baseVersion?: number;
@@ -229,6 +251,7 @@ export default definePluginEntry({
           targetRoles: params.targetRoles,
           participants: params.participants,
           projectId: params.projectId,
+          runId: params.runId,
           artifactIds: params.artifactIds,
           interfaceId: params.interfaceId,
           subject: params.subject,
@@ -251,10 +274,14 @@ export default definePluginEntry({
       name: "multiagent_memory_inspect",
       label: "Inspect Multi-Agent Memory",
       description: "Inspect memory items that would be retrieved for a task or subagent objective.",
-      parameters: Type.Object({ query: Type.String() }),
+      parameters: Type.Object({
+        query: Type.String(),
+        projectId: Type.Optional(Type.String()),
+        runId: Type.Optional(Type.String()),
+      }),
       async execute(_id, rawParams) {
-        const params = rawParams as { query: string };
-        const result = await engine.inspect(params.query);
+        const params = rawParams as { query: string; projectId?: string; runId?: string };
+        const result = await engine.inspect(params.query, undefined, params.projectId, params.runId);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result };
       },
     });
