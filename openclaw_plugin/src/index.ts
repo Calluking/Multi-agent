@@ -138,7 +138,20 @@ export default definePluginEntry({
       const assignment = typeof (event.params as any).taskName === "string" ? String((event.params as any).taskName)
         : typeof (event.params as any).label === "string" ? String((event.params as any).label) : undefined;
       const consumerId = assignment ?? role;
+      if (assignment) {
+        await engine.registerAssignment({ projectId, runId, assignmentId: assignment, task, workspace });
+      }
       if (workspace) await engine.observeWorkflow(workspace, consumerId, projectId, runId);
+      if (consumerId) {
+        const recovery = await engine.recoveryAdmission(consumerId, projectId, runId);
+        if (!recovery.allowed) {
+          return {
+            block: true,
+            blockReason: `Multi-agent recovery gate blocked ${consumerId}: ${recovery.reason}. `
+              + "Escalate for explicit task-level intervention instead of repeating the failed strategy.",
+          };
+        }
+      }
       const blockers = await engine.readinessBlockers(consumerId, projectId, runId);
       if (blockers.length) {
         const detail = blockers.map((item) =>
@@ -182,6 +195,33 @@ export default definePluginEntry({
         projectId: ctx.sessionKey ? projectBySession.get(ctx.sessionKey) : undefined,
         runId: ctx.sessionKey ? runBySession.get(ctx.sessionKey) : undefined,
       });
+    }, { priority: 80, timeoutMs: 10_000 });
+
+    api.on("before_agent_finalize", async (event) => {
+      const sessionKey = event.sessionKey ?? "";
+      if (!sessionKey || childLedger.has(sessionKey) || event.stopHookActive) return;
+      const terminalIntent = /\b(done|complete|completed|finished|final|successfully|all tests pass(?:ed)?)\b/i
+        .test(event.lastAssistantMessage ?? "");
+      if (!terminalIntent) return;
+      const projectId = projectBySession.get(sessionKey);
+      const runId = runBySession.get(sessionKey);
+      const workspace = event.cwd ?? workspaceBySession.get(sessionKey);
+      if (!projectId || !runId) return;
+      if (workspace) await engine.observeWorkflow(workspace, undefined, projectId, runId);
+      const blockers = await engine.completionBlockers(projectId, runId);
+      if (!blockers.length) return;
+      const summary = blockers.map((item) =>
+        `${item.id}[${item.lifecycleState ?? item.status ?? "unresolved"}]`).join(", ");
+      return {
+        action: "revise" as const,
+        reason: `Multi-agent completion gate found unresolved obligations: ${summary}`,
+        retry: {
+          idempotencyKey: `multiagent-completion:${projectId}:${runId}`,
+          maxAttempts: 1,
+          instruction: `Do not report completion. Resolve these exact obligations first: ${summary}. `
+            + "Resume or spawn the recorded recovery owner, use a materially changed strategy after failure, rerun the configured verification command, and verify every shared contract with real boundary evidence.",
+        },
+      };
     }, { priority: 80, timeoutMs: 10_000 });
 
     api.on("subagent_spawned", async (event: any, ctx: any) => {

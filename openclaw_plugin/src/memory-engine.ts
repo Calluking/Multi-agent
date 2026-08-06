@@ -1,6 +1,6 @@
 import { access, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 
 export type MemoryKind = "dependency" | "codomain" | "testing";
 export type ContractAction = "propose" | "challenge" | "revise" | "accept" | "verify";
@@ -12,6 +12,7 @@ export type PluginConfig = {
   codomainEnabled?: boolean;
   testingEnabled?: boolean;
   maxItemsPerMemory?: number;
+  maxRecoveryAttempts?: number;
 };
 
 export type MemoryItem = {
@@ -38,6 +39,8 @@ export type MemoryItem = {
   verificationAttempts?: VerificationAttempt[];
   recoveryOwnerId?: string;
   lifecycleOutcomes?: LifecycleOutcome[];
+  assignmentId?: string;
+  workDirectory?: string;
   priority?: number;
   version?: number;
   status?: string;
@@ -79,6 +82,10 @@ const EMPTY_BANK: Bank = { schemaVersion: "0.1", items: [] };
 
 function terms(value: string): Set<string> {
   return new Set((value.toLowerCase().match(/[a-z0-9_+-]+|[\u4e00-\u9fff]{1,4}/g) ?? []));
+}
+
+function escapePattern(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function score(item: MemoryItem, query: string, sessionKey?: string): number {
@@ -211,6 +218,7 @@ export class MemoryEngine {
       codomainEnabled: config.codomainEnabled ?? true,
       testingEnabled: config.testingEnabled ?? true,
       maxItemsPerMemory: config.maxItemsPerMemory ?? 3,
+      maxRecoveryAttempts: config.maxRecoveryAttempts ?? 2,
     };
   }
 
@@ -408,7 +416,7 @@ export class MemoryEngine {
     if (matches.length < 2) return false;
     const assignments = matches.map((match) => {
       const id = match[1].trim();
-      const body = match[2].trim();
+      const body = match[2].trim().split(/\n(?:Peer\s+\d+|taskName\/label|taskName|label)\s*:/i)[0].trim();
       const title = body.match(/(?:Title|Feature)\s*:\s*([^\n]+)/i)?.[1]?.trim() ?? id;
       const files = [...body.matchAll(/`([^`]+\.[A-Za-z0-9]+)`|(?:Files? Modified|File)\s*:\s*[-*]?\s*([^\s,]+)/gi)]
         .map((entry) => (entry[1] ?? entry[2] ?? "").replace(/^[-*]\s*/, "").trim())
@@ -550,6 +558,26 @@ export class MemoryEngine {
         : !["produced", "verified", "ready"].includes(item.lifecycleState ?? ""));
   }
 
+  async recoveryAdmission(assignmentId: string, projectId: string, runId: string): Promise<{
+    obligations: MemoryItem[]; allowed: boolean; reason?: string;
+  }> {
+    const assignment = normalizeIdentity(assignmentId);
+    const dependency = await this.load("dependency");
+    const obligations = dependency.items.filter((item) => inContext(item, projectId, runId))
+      .filter((item) => normalizeIdentity(item.recoveryOwnerId ?? "") === assignment)
+      .filter((item) => item.lifecycleState === "blocked");
+    const exhausted = obligations.filter((item) =>
+      (item.lifecycleOutcomes ?? []).filter((outcome) => outcome.outcome !== "ok").length
+        >= this.config.maxRecoveryAttempts);
+    return {
+      obligations,
+      allowed: exhausted.length === 0,
+      reason: exhausted.length
+        ? `recovery budget exhausted for ${exhausted.map((item) => item.id).join(", ")}`
+        : undefined,
+    };
+  }
+
   async recordLifecycleOutcome(input: {
     selectedIds: string[]; assignment?: string; outcome: string; error?: string;
   }): Promise<void> {
@@ -572,6 +600,58 @@ export class MemoryEngine {
           `agent outcome=${input.outcome}; assignment=${input.assignment ?? "unknown"}; error=${input.error ?? "none"}`].slice(-20),
       });
     }
+  }
+
+  async registerAssignment(input: {
+    projectId: string; runId: string; assignmentId: string; task: string; workspace?: string;
+  }): Promise<MemoryItem[]> {
+    const assignment = input.assignmentId.trim();
+    if (!assignment) return [];
+    const escaped = escapePattern(assignment);
+    const focused = input.task.match(new RegExp(
+      `(?:taskName/label|taskName|label|assignment)\\s*[:=]?\\s*['"]?${escaped}['"]?[\\s\\S]{0,1800}`,
+      "i"))?.[0] ?? input.task;
+    const rawWorkDir = focused.match(/work only in\s+`([^`]+)`/i)?.[1]
+      ?? focused.match(/working directory\s*[:=]\s*`?([^`\n]+)`?/i)?.[1];
+    let workDirectory = rawWorkDir?.trim().replace(/[\\/]+$/, "");
+    if (workDirectory && isAbsolute(workDirectory) && input.workspace) {
+      const rel = relative(resolve(input.workspace), resolve(workDirectory));
+      workDirectory = rel.startsWith("..") || isAbsolute(rel) ? undefined : rel;
+    }
+    if (workDirectory?.split(/[\\/]/).includes("..")) workDirectory = undefined;
+
+    const dependency = await this.load("dependency");
+    const records = dependency.items.filter((item) => inContext(item, input.projectId, input.runId))
+      .filter((item) => normalizedSet(item.producerIds).includes(normalizeIdentity(assignment)));
+    const updated: MemoryItem[] = [];
+    for (const item of records) {
+      const artifacts = (item.artifactIds ?? []).map((artifact) =>
+        workDirectory && !artifact.startsWith(workDirectory + "/") ? `${workDirectory}/${artifact}` : artifact);
+      const readyArtifact = focused.match(/write\s+`?([^`\s]*PATCH_READY\.md)`?/i)?.[1];
+      if (readyArtifact && !artifacts.includes(readyArtifact)) artifacts.push(readyArtifact);
+      updated.push(await this.upsert({
+        ...item,
+        assignmentId: assignment,
+        workDirectory,
+        artifactIds: artifacts,
+        targetRoles: [assignment],
+      }));
+    }
+    return updated;
+  }
+
+  async completionBlockers(projectId: string, runId: string): Promise<MemoryItem[]> {
+    const dependency = await this.load("dependency");
+    const artifactBlockers = dependency.items.filter((item) => inContext(item, projectId, runId))
+      .filter((item) => (item.consumerIds ?? []).some((consumer) =>
+        ["completion", "coordinator"].includes(normalizeIdentity(consumer))))
+      .filter((item) => item.verificationCommand
+        ? item.lifecycleState !== "verified" && item.lifecycleState !== "ready"
+        : !["produced", "verified", "ready"].includes(item.lifecycleState ?? ""));
+    const codomain = await this.load("codomain");
+    const contractBlockers = codomain.items.filter((item) => inContext(item, projectId, runId))
+      .filter((item) => item.status !== "verified");
+    return [...artifactBlockers, ...contractBlockers];
   }
 
   private async observeArtifact(workspace: string, artifactId: string, source: string): Promise<ArtifactObservation> {
@@ -626,12 +706,25 @@ export class MemoryEngine {
       })].join("\n"));
     }
     if (!sections.length) return { packet: "", selected, role };
+    const recoveryItems = (await this.load("dependency")).items
+      .filter((item) => selected.dependency.includes(item.id) && item.recoveryOwnerId
+        && normalizeIdentity(item.recoveryOwnerId) === normalizeIdentity(role ?? "")
+        && item.lifecycleState === "blocked");
+    const recoveryDirective = recoveryItems.length ? [
+      "BOUNDED RECOVERY OBLIGATION",
+      ...recoveryItems.map((item) => {
+        const attempts = (item.lifecycleOutcomes ?? []).filter((outcome) => outcome.outcome !== "ok").length;
+        return `- ${item.id}: attempt ${attempts + 1}/${this.config.maxRecoveryAttempts}; latest failure=${item.evidence?.at(-1) ?? "unknown"}`;
+      }),
+      "Do not repeat the failed approach. First persist a checkpoint, state one materially changed strategy grounded in the failure evidence, apply the smallest repair, and rerun the exact configured verification command.",
+    ].join("\n") : "";
     return {
       selected,
       role,
       packet: [
         "\n\n--- MULTI-AGENT MEMORY CONTEXT (plugin-injected) ---",
         ...sections,
+        recoveryDirective,
         `Target role: ${role ?? "unclassified"}. Only records relevant to this role/boundary were selected.`,
         "Use these records as current working context. Dependency records describe state, not permission to invent missing evidence. Co-domain records describe producer/consumer semantics, not Agent handoffs. Testing records are inject-only practices and add no retries or rerouting. If a record is wrong or stale, report a typed update through multiagent_memory_record instead of silently ignoring it.",
         "--- END MULTI-AGENT MEMORY CONTEXT ---",

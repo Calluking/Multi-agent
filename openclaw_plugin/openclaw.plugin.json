@@ -17,7 +17,8 @@
       "dependencyEnabled": { "type": "boolean", "default": true },
       "codomainEnabled": { "type": "boolean", "default": true },
       "testingEnabled": { "type": "boolean", "default": true },
-      "maxItemsPerMemory": { "type": "integer", "minimum": 1, "maximum": 8, "default": 3 }
+      "maxItemsPerMemory": { "type": "integer", "minimum": 1, "maximum": 8, "default": 3 },
+      "maxRecoveryAttempts": { "type": "integer", "minimum": 1, "maximum": 5, "default": 2 }
     }
   }
 }

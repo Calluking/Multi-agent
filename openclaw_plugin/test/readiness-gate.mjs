@@ -37,6 +37,21 @@ try {
     throw new Error("failed lifecycle did not create owned recovery obligation");
   }
   if (solution.lifecycleOutcomes.at(-1).outcome !== "timeout") throw new Error("lifecycle outcome was not retained");
+  let admission = await engine.recoveryAdmission("implementer", "task", undefined);
+  if (!admission.allowed || admission.obligations.length !== 1) throw new Error("first bounded recovery was not admitted");
+  const packet = await engine.buildSpawnPacket("Implement solution.py after timeout", undefined,
+    "implementer", "task", undefined);
+  if (!packet.packet.includes("BOUNDED RECOVERY OBLIGATION")
+    || !packet.packet.includes("materially changed strategy")) {
+    throw new Error("recovery directive was not injected");
+  }
+  await engine.recordLifecycleOutcome({
+    selectedIds: ["task:solution"], assignment: "implementer", outcome: "error", error: "retry failed",
+  });
+  admission = await engine.recoveryAdmission("implementer", "task", undefined);
+  if (admission.allowed || !admission.reason?.includes("exhausted")) {
+    throw new Error("bounded recovery budget was not enforced");
+  }
   console.log("PASS readiness gating and lifecycle recovery ownership");
 } finally {
   await rm(root, { recursive: true, force: true });

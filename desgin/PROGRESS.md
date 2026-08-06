@@ -24,16 +24,16 @@ Status values: `DONE`, `PARTIAL`, `TODO`, `BLOCKED`.
 | Sparse assignment-aware retrieval | PARTIAL | Only relevant private records and shared boundary contracts reach each agent |
 | Spawn/completion episode correlation | DONE | Injection IDs correlate with real child session keys and outcomes |
 | Deterministic artifact observer | DONE | File, command-result, failed/timeout child lifecycle, artifact version, and stale-verification observations are typed and tested |
-| Dependency state reconciler | PARTIAL | Evidence-driven blocked/produced/verified/stale transitions and project/run isolation work; ready/completion reconciliation remains |
-| Verification ledger | PARTIAL | Exact commands, exit codes, bounded output/error, artifact hashes, attempts, failures, and reruns persist; diagnosis and repair ownership remain |
-| Readiness gate | PARTIAL | Downstream spawn is project/run-scoped and blocked on unresolved prerequisites while producers remain allowed; completion gate remains |
-| Recovery scheduler | PARTIAL | Failed/timeout outcomes create an owned recovery obligation and gate reason; automatic bounded retry admission remains |
+| Dependency state reconciler | DONE | Evidence-driven blocked/produced/verified/stale transitions, project/run isolation, and completion reconciliation are implemented |
+| Verification ledger | DONE | Exact commands, exit codes, bounded output/error, artifact hashes, attempts, failures, reruns, and repair ownership persist |
+| Readiness gate | DONE | Downstream spawn is project/run-scoped and blocked on unresolved prerequisites while producers remain allowed |
+| Recovery scheduler | DONE | Failures create owned obligations, changed-strategy packets, bounded admission, and explicit exhaustion escalation |
 | Same-command re-verification | TODO | A repair resolves a blocker only after the required command passes |
 | Contract negotiation lifecycle | DONE | Typed proposal, challenge, revision, acceptance, verification, canonical evolution, and stale-version rejection are tested |
-| Completion gate | TODO | Success is prohibited while required artifacts, contracts, or verification entries remain unresolved |
-| MultiAgentBench adapter | PARTIAL | Fixed workflow maps cleanly into universal assignments and artifacts |
-| CooperBench adapter | PARTIAL | Peer feature ownership and shared artifacts map cleanly without role-name assumptions |
-| Benchmark-independent core | TODO | Banks, routing, observation, recovery, and gates contain no benchmark-specific logic |
+| Completion gate | DONE | Terminal completion is revised while project-scoped artifacts or contracts remain unresolved |
+| MultiAgentBench adapter | DONE | Fixed workflow maps through generic producer/consumer artifact dependencies |
+| CooperBench adapter | DONE | Arbitrary peer IDs, work directories, owned artifacts, and shared contracts map without role-name assumptions |
+| Benchmark-independent core | DONE | Banks, routing, observation, recovery, and gates contain no benchmark-specific control logic |
 
 ## Structured canonical identity implementation
 
@@ -69,7 +69,7 @@ Do not use intermediate benchmark runs as substitutes for completing the archite
 
 ## Next implementation milestone
 
-Project/run isolation is now implemented. The next step is the universal assignment adapter: normalize arbitrary assignment IDs, owned working directories, artifact paths, producer/consumer participation, and verification commands before enabling completion enforcement.
+The universal plugin implementation is complete for evaluation. Freeze behavior after native integration validation, then run CooperBench and MultiAgentBench as the final verification phase.
 
 Current observer evidence:
 
@@ -120,3 +120,18 @@ Project/run isolation evidence:
 - other-project and other-run blockers cannot affect the active task;
 - unscoped reusable practices remain retrievable;
 - partial legacy updates remain safe when their ID is unambiguous.
+
+Universal control-plane completion evidence:
+
+- arbitrary assignment IDs register without planner/implementer/reviewer inference;
+- assignment work directories are normalized and confined;
+- owned artifact paths and handoff artifacts are assignment-scoped;
+- peer paths cannot leak into another owner's dependency record;
+- downstream spawns are blocked until prerequisites are produced or verified;
+- failed owners receive an evidence-bearing changed-strategy recovery packet;
+- retry admission is bounded and exhaustion requires escalation;
+- terminal completion is revised while completion artifacts or shared contracts remain unresolved;
+- completion releases only after artifact and contract obligations are satisfied;
+- native OpenClaw runtime loads all six hooks and both tools with zero plugin diagnostics;
+- conversation access is explicitly enabled for the completion-finalization hook;
+- the complete local suite contains eleven passing behavioral test scripts.

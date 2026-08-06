@@ -53,6 +53,9 @@ Example config:
     entries: {
       "multiagent-memory": {
         enabled: true,
+        hooks: {
+          allowConversationAccess: true
+        },
         config: {
           storeRoot: "/home/luzh/.openclaw/multiagent-memory",
           dependencyEnabled: true,

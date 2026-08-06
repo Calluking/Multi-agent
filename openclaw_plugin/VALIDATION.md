@@ -35,3 +35,18 @@ After correcting parent correlation to use `ctx.requesterSessionKey`:
 ## What this proves
 
 The plugin is on the real subagent creation and completion path. It can inject bounded memory before work and persist a correlated episode afterward. It does not yet prove that the generic lexical banks match the effectiveness of the benchmark-specific Python memory implementation across all 20 tasks.
+
+## Universal control-plane validation
+
+The completed pre-benchmark plugin registers these native hooks:
+
+- `before_prompt_build`
+- `before_tool_call`
+- `after_tool_call`
+- `before_agent_finalize`
+- `subagent_spawned`
+- `subagent_ended`
+
+Runtime inspection reports both memory tools, six typed hooks, and no plugin diagnostics. The local OpenClaw entry explicitly enables `hooks.allowConversationAccess` so the project-scoped completion gate can inspect terminal intent.
+
+The automated suite verifies concurrency, structured deduplication, project/run isolation, arbitrary assignment ownership, artifact observation, version-bound command evidence, readiness and bounded recovery, completion blocking/release, contract version lifecycle, role/assignment targeting, and product co-domain filtering.
