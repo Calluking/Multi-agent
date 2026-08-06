@@ -13,6 +13,7 @@
     "additionalProperties": false,
     "properties": {
       "storeRoot": { "type": "string", "description": "Directory containing the three memory banks." },
+      "autoInitialize": { "type": "boolean", "default": true, "description": "Ask the root coordinator to derive task-local memory before its first child spawn." },
       "dependencyEnabled": { "type": "boolean", "default": true },
       "codomainEnabled": { "type": "boolean", "default": true },
       "testingEnabled": { "type": "boolean", "default": true },

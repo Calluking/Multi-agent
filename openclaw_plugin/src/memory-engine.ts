@@ -1,10 +1,11 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 export type MemoryKind = "dependency" | "codomain" | "testing";
 
 export type PluginConfig = {
   storeRoot?: string;
+  autoInitialize?: boolean;
   dependencyEnabled?: boolean;
   codomainEnabled?: boolean;
   testingEnabled?: boolean;
@@ -19,12 +20,16 @@ export type MemoryItem = {
   text: string;
   tags?: string[];
   ownerSessionKey?: string;
+  targetRoles?: string[];
+  participants?: string[];
+  priority?: number;
+  version?: number;
   status?: string;
   evidence?: string[];
   updatedAt: string;
 };
 
-type Bank = { schemaVersion: "0.1"; items: MemoryItem[] };
+export type Bank = { schemaVersion: "0.1"; items: MemoryItem[] };
 
 const EMPTY_BANK: Bank = { schemaVersion: "0.1", items: [] };
 
@@ -38,8 +43,51 @@ function score(item: MemoryItem, query: string, sessionKey?: string): number {
   let result = 0;
   for (const token of queryTerms) if (itemTerms.has(token)) result += 1;
   if (item.scope === "private" && item.ownerSessionKey === sessionKey) result += 8;
+  // State/priority refines an already relevant match; it must never make an
+  // unrelated item retrievable by itself.
+  if (result === 0) return 0;
   if (item.status === "unresolved" || item.status === "required") result += 2;
   return result;
+}
+
+export function inferRole(value: string): string | undefined {
+  const text = value.toLowerCase();
+  // Explicit assignment outranks artifact mentions. Implementer prompts often
+  // mention plan.md and Reviewer prompts mention every predecessor artifact.
+  if (/you are (?:the )?reviewer\b|role\s*[=:]\s*reviewer|responsible only for (?:executable )?verification/.test(text)) return "reviewer";
+  if (/you are (?:the )?implementer\b|role\s*[=:]\s*implementer|responsible only for solution/.test(text)) return "implementer";
+  if (/you are (?:the )?planner\b|role\s*[=:]\s*planner|responsible only for plan/.test(text)) return "planner";
+  if (/\breviewer\b|review\.md|executable verification/.test(text)) return "reviewer";
+  if (/\bimplementer\b|implementation\.md/.test(text)) return "implementer";
+  if (/\bplanner\b|plan\.md/.test(text)) return "planner";
+  return undefined;
+}
+
+function normalizedRoles(item: MemoryItem): string[] {
+  const explicit = item.targetRoles ?? [];
+  const tagged = (item.tags ?? [])
+    .filter((tag) => tag.toLowerCase().startsWith("role:"))
+    .map((tag) => tag.slice(5));
+  return [...new Set([...explicit, ...tagged].map((role) => role.toLowerCase()))];
+}
+
+function isRelevantToRole(item: MemoryItem, role?: string): boolean {
+  const roles = normalizedRoles(item);
+  if (!roles.length) return true;
+  return Boolean(role && roles.includes(role.toLowerCase()));
+}
+
+function isCurrent(item: MemoryItem): boolean {
+  return !["superseded", "rejected", "closed"].includes((item.status ?? "").toLowerCase());
+}
+
+function isProductCodomain(item: MemoryItem): boolean {
+  const value = `${item.title}\n${item.text}`;
+  const producer = value.match(/producer domain\s*=\s*([^;\n]+)/i)?.[1] ?? "";
+  const consumer = value.match(/consumer domain\s*=\s*([^;\n]+)/i)?.[1] ?? "";
+  if (!producer || !consumer) return false;
+  const endpoints = `${producer}\n${consumer}`;
+  return !/\b(planner|planning|implementer|implementation|reviewer|review|verification|tooling)\b|plan\.md|solution\.py|implementation\.md|review\.md/i.test(endpoints);
 }
 
 export class MemoryEngine {
@@ -50,6 +98,7 @@ export class MemoryEngine {
   constructor(config: PluginConfig = {}) {
     this.root = resolve(config.storeRoot ?? ".openclaw/multiagent-memory");
     this.config = {
+      autoInitialize: config.autoInitialize ?? true,
       dependencyEnabled: config.dependencyEnabled ?? true,
       codomainEnabled: config.codomainEnabled ?? true,
       testingEnabled: config.testingEnabled ?? true,
@@ -93,16 +142,23 @@ export class MemoryEngine {
     }
   }
 
-  async retrieve(kind: MemoryKind, query: string, sessionKey?: string): Promise<MemoryItem[]> {
+  async retrieve(kind: MemoryKind, query: string, sessionKey?: string, role = inferRole(query)): Promise<MemoryItem[]> {
     const bank = await this.load(kind);
     return bank.items
       .filter((item) => item.kind === kind)
+      .filter(isCurrent)
+      .filter((item) => isRelevantToRole(item, role))
+      .filter((item) => kind !== "codomain" || isProductCodomain(item))
       // Episodes are retained as learning/audit evidence. They are not team
       // practices and must not be replayed into every later child prompt.
       .filter((item) => !(kind === "testing" && item.tags?.includes("episode")))
       .map((item) => ({ item, score: score(item, query, sessionKey) }))
-      .filter((entry) => entry.score > 0 || kind === "testing")
-      .sort((a, b) => b.score - a.score || b.item.updatedAt.localeCompare(a.item.updatedAt))
+      // Sparse retrieval is essential: an unrelated practice or interface is
+      // worse than no memory because it consumes context and changes behavior.
+      .filter((entry) => entry.score > 0)
+      .sort((a, b) => (b.item.priority ?? 0) - (a.item.priority ?? 0)
+        || b.score - a.score || (b.item.version ?? 0) - (a.item.version ?? 0)
+        || b.item.updatedAt.localeCompare(a.item.updatedAt))
       .slice(0, this.config.maxItemsPerMemory)
       .map((entry) => entry.item);
   }
@@ -119,10 +175,142 @@ export class MemoryEngine {
     });
   }
 
-  async buildSpawnPacket(task: string, parentSessionKey?: string): Promise<{
+  async initializeFromTask(taskText: string): Promise<void> {
+    if (await this.initializeFromCooperativeAssignments(taskText)) return;
+    const project = taskText.match(/called\s+([A-Za-z][A-Za-z0-9_-]+)/i)?.[1] ?? "task";
+    const empty = async (kind: MemoryKind) => (await this.load(kind)).items.length === 0;
+    if (this.config.dependencyEnabled && await empty("dependency")) {
+      await this.upsert({
+        id: `${project}:plan-artifact`, kind: "dependency", scope: "private",
+        title: `${project} planning target`, targetRoles: ["planner", "implementer"], priority: 100,
+        text: "Required before=implementation; Required state=plan.md exists and reflects TASK.md; Observed=missing; Evidence=workspace file check; Blocker=plan.md absent; Next action=write and inspect plan.md",
+        status: "unresolved", evidence: [], tags: [project, "artifact", "plan.md"],
+      });
+      await this.upsert({
+        id: `${project}:implementation-artifacts`, kind: "dependency", scope: "private",
+        title: `${project} implementation target`, targetRoles: ["implementer", "reviewer"], priority: 100,
+        text: "Required before=review; Required state=solution.py and implementation.md exist; Observed=missing; Evidence=workspace file check and executable command; Blocker=implementation artifacts absent; Next action=implement the complete TASK.md scope and run its primary verification",
+        status: "unresolved", evidence: [], tags: [project, "artifact", "solution.py", "implementation.md"],
+      });
+      await this.upsert({
+        id: `${project}:review-artifact`, kind: "dependency", scope: "private",
+        title: `${project} verification target`, targetRoles: ["reviewer"], priority: 100,
+        text: "Required before=completion; Required state=review.md records an independently executed command, exit status, and result; Observed=missing; Evidence=workspace file check; Blocker=review evidence absent; Next action=run independent verification, repair material failures, and record exact evidence",
+        status: "unresolved", evidence: [], tags: [project, "artifact", "review.md", "verification"],
+      });
+    }
+    if (this.config.testingEnabled && await empty("testing")) {
+      await this.upsert({
+        id: `${project}:implementer-verification-practice`, kind: "testing", scope: "shared",
+        title: "Incremental public-interface verification", targetRoles: ["implementer"], priority: 80,
+        text: "Responsibility=implementer; Trigger=multi-stage implementation or explicit ordering; Command=run executable checks after each implemented slice and the primary end-to-end path; Pass evidence=exit 0 plus assertions on observable public behavior; Failure action=diagnose and revise before handoff",
+        status: "required", evidence: [], tags: [project, "role:implementer", "verification", "end-to-end"],
+      });
+      await this.upsert({
+        id: `${project}:reviewer-verification-practice`, kind: "testing", scope: "shared",
+        title: "Independent boundary and negative verification", targetRoles: ["reviewer"], priority: 90,
+        text: "Responsibility=reviewer; Trigger=review or executable verification; Command=run the documented entrypoint and independent happy-path, invalid-input, ordering, and cross-boundary checks; Pass evidence=exact command, exit status, assertion counts, and observed result; Failure action=repair material failures and rerun before approval",
+        status: "required", evidence: [], tags: [project, "role:reviewer", "verification", "boundary"],
+      });
+    }
+    // Only create a co-domain contract when TASK.md itself identifies a real
+    // producer/consumer boundary. Build-order wording alone remains dependency.
+    if (this.config.codomainEnabled && await empty("codomain")
+      && /registration|profile/i.test(taskText) && /feedback|rating|review/i.test(taskText)) {
+      await this.upsert({
+        id: `${project}:experience-feedback-contract`, kind: "codomain", scope: "shared",
+        title: "Experience modules to feedback boundary", targetRoles: ["implementer", "reviewer"],
+        participants: ["experience modules", "feedback and rating module"], priority: 85, version: 1,
+        text: "Producer domain=experience modules; Consumer domain=feedback and rating module; Shared data=target_type, target_id, participant user_id, completion state; Obligations=producer exposes stable existing experience identity and consumer rejects unknown or inaccessible targets; Invariant=feedback refers to a real completed tour, exchange, or workshop and rating remains within the declared range; Boundary test=create each real experience, submit feedback, then reject unknown id/type without side effects",
+        status: "agreed", evidence: [], tags: [project, "feedback", "rating", "boundary"],
+      });
+      await this.upsert({
+        id: `${project}:identity-feature-contract`, kind: "codomain", scope: "shared",
+        title: "Registration identity to protected features", targetRoles: ["implementer", "reviewer"],
+        participants: ["registration and profile module", "tour language and workshop modules"], priority: 80, version: 1,
+        text: "Producer domain=registration and profile module; Consumer domain=tour language and workshop modules; Shared data=user_id, profile identity, cultural interests and languages; Obligations=producer returns a stable registered identity and consumers validate it before mutation; Invariant=no protected feature state is created for an unknown user; Boundary test=perform each feature with a registered user, then reject an unknown user while preserving state",
+        status: "agreed", evidence: [], tags: [project, "registration", "profile", "boundary"],
+      });
+    }
+  }
+
+  private async initializeFromCooperativeAssignments(taskText: string): Promise<boolean> {
+    const matches = [...taskText.matchAll(/\[Assignment\s+([^\]]+)\]([\s\S]*?)(?=\n\[Assignment\s+|$)/gi)];
+    if (matches.length < 2) return false;
+    const project = taskText.match(/\[Project\s+([^\]]+)\]/i)?.[1]?.trim() ?? "cooperative-task";
+    const assignments = matches.map((match) => {
+      const id = match[1].trim();
+      const body = match[2].trim();
+      const title = body.match(/(?:Title|Feature)\s*:\s*([^\n]+)/i)?.[1]?.trim() ?? id;
+      const files = [...body.matchAll(/`([^`]+\.[A-Za-z0-9]+)`|(?:Files? Modified|File)\s*:\s*[-*]?\s*([^\s,]+)/gi)]
+        .map((entry) => (entry[1] ?? entry[2] ?? "").replace(/^[-*]\s*/, "").trim())
+        .filter(Boolean);
+      return { id, body, title, files: [...new Set(files)] };
+    });
+    const sharedFiles = assignments[0].files.filter((file) => assignments.slice(1).some((item) => item.files.includes(file)));
+    const taskTag = `project:${project.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+
+    if (this.config.dependencyEnabled) {
+      for (const assignment of assignments) {
+        await this.upsert({
+          id: `${taskTag}:assignment:${assignment.id}`, kind: "dependency", scope: "private",
+          title: `${assignment.id} deliverable state`, targetRoles: [assignment.id], priority: 90,
+          text: `Required before=assignment handoff; Required state=${assignment.title} implemented in ${assignment.files.join(", ") || "assigned artifact"}; Observed=missing; Evidence=patch and assignment tests; Blocker=assigned feature not yet evidenced; Next action=implement only ${assignment.id}, preserve partner-owned semantics, and report changed API/artifact plus test evidence`,
+          status: "unresolved", evidence: [], tags: [taskTag, `assignment:${assignment.id}`, ...assignment.files],
+        });
+      }
+    }
+    if (this.config.codomainEnabled && sharedFiles.length) {
+      const left = assignments[0], right = assignments[1];
+      await this.upsert({
+        id: `${taskTag}:shared-artifact:${sharedFiles.join("+")}`, kind: "codomain", scope: "shared",
+        title: `Shared contract for ${sharedFiles.join(", ")}`, targetRoles: assignments.map((item) => item.id),
+        participants: assignments.map((item) => item.id), priority: 100, version: 1,
+        text: `Producer domain=${left.id} (${left.title}); Consumer domain=${right.id} (${right.title}); Shared data=${sharedFiles.join(", ")} public API signature, default behavior, validation order, and return shape; Obligations=each assignment changes only its feature semantics while preserving the partner option and backward-compatible defaults; Invariant=both options compose in one call without either feature overwriting the other's signature, token stream, errors, or return type; Boundary test=run each feature test independently, then call the shared API with both options enabled and verify both behaviors simultaneously`,
+        status: "proposed", evidence: [], tags: [taskTag, "shared-artifact", "composition", ...sharedFiles],
+      });
+    }
+    if (this.config.testingEnabled) {
+      for (const assignment of assignments) {
+        await this.upsert({
+          id: `${taskTag}:testing:${assignment.id}`, kind: "testing", scope: "shared",
+          title: `${assignment.id} independent and composition verification`, targetRoles: [assignment.id], priority: 90,
+          text: `Responsibility=${assignment.id}; Trigger=shared artifact or API modified by another assignment; Command=run baseline tests, ${assignment.id} feature tests, and a composition check combining both assignments; Pass evidence=exact commands and assertions showing own feature, partner defaults, and joint behavior; Failure action=revise only the conflicting boundary and rerun before handoff`,
+          status: "required", evidence: [], tags: [taskTag, `assignment:${assignment.id}`, "composition", ...sharedFiles],
+        });
+      }
+    }
+    return true;
+  }
+
+  async observeWorkflow(workspace: string, nextRole?: string): Promise<void> {
+    const exists = async (name: string) => access(resolve(workspace, name)).then(() => true).catch(() => false);
+    const dependency = await this.load("dependency");
+    for (const item of dependency.items) {
+      if (!isRelevantToRole(item, nextRole)) continue;
+      const wanted = (item.tags ?? []).filter((tag) => /\.(md|py)$/i.test(tag));
+      if (!wanted.length) continue;
+      const checks = await Promise.all(wanted.map(async (name) => [name, await exists(name)] as const));
+      const missing = checks.filter(([, present]) => !present).map(([name]) => name);
+      const observed = checks.map(([name, present]) => `${name}=${present ? "present" : "missing"}`);
+      await this.upsert({
+        ...item,
+        status: missing.length ? "unresolved" : "verified",
+        text: item.text
+          .replace(/Observed=[^;]*/i, `Observed=${missing.length ? "missing" : "present"}`)
+          .replace(/Evidence=[^;]*/i, `Evidence=${observed.join(", ")}`)
+          .replace(/Blocker=[^;]*/i, `Blocker=${missing.length ? `${missing.join(", ")} absent` : "null"}`),
+        evidence: observed,
+      });
+    }
+  }
+
+  async buildSpawnPacket(task: string, parentSessionKey?: string, assignment?: string): Promise<{
     packet: string;
     selected: Record<MemoryKind, string[]>;
+    role?: string;
   }> {
+    const role = assignment ?? inferRole(task);
     const selected: Record<MemoryKind, string[]> = { dependency: [], codomain: [], testing: [] };
     const sections: string[] = [];
     const enabled: Array<[MemoryKind, boolean, string]> = [
@@ -132,18 +320,20 @@ export class MemoryEngine {
     ];
     for (const [kind, isEnabled, heading] of enabled) {
       if (!isEnabled) continue;
-      const items = await this.retrieve(kind, task, parentSessionKey);
+      const items = await this.retrieve(kind, task, parentSessionKey, role);
       selected[kind] = items.map((item) => item.id);
       if (!items.length) continue;
       sections.push([heading, ...items.map((item) => `- [${item.id}] ${item.title}: ${item.text}`)].join("\n"));
     }
-    if (!sections.length) return { packet: "", selected };
+    if (!sections.length) return { packet: "", selected, role };
     return {
       selected,
+      role,
       packet: [
         "\n\n--- MULTI-AGENT MEMORY CONTEXT (plugin-injected) ---",
         ...sections,
-        "Use these records as current working context. Do not claim completion without observable artifact/test evidence. If a record is wrong or stale, report a typed update through multiagent_memory_record instead of silently ignoring it.",
+        `Target role: ${role ?? "unclassified"}. Only records relevant to this role/boundary were selected.`,
+        "Use these records as current working context. Dependency records describe state, not permission to invent missing evidence. Co-domain records describe producer/consumer semantics, not Agent handoffs. Testing records are inject-only practices and add no retries or rerouting. If a record is wrong or stale, report a typed update through multiagent_memory_record instead of silently ignoring it.",
         "--- END MULTI-AGENT MEMORY CONTEXT ---",
       ].join("\n\n"),
     };
