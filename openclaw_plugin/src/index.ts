@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { MemoryEngine, type ContractAction, type MemoryKind, type PluginConfig } from "./memory-engine.js";
 
@@ -152,6 +152,11 @@ export default definePluginEntry({
         observedWorkspace = task.match(/(?:working|work)\s+(?:only\s+)?in\s+`?(\/[^`\s),]+)/i)?.[1]?.trim()
           ?? task.match(/workspace(?:\s+root)?[^/\n]*(\/[^)\n]+)/i)?.[1]?.trim()
           ?? "";
+        observedWorkspace = observedWorkspace.replace(/[.;:]+$/, "");
+        if (!observedWorkspace) {
+          const artifactPath = task.match(/(\/[^`\s,]+\/(?:TASK\.md|plan\.md|solution\.py|implementation\.md|review\.md))/i)?.[1];
+          if (artifactPath) observedWorkspace = dirname(artifactPath);
+        }
       }
       if (ctx.sessionKey && observedWorkspace) {
         workspaceBySession.set(ctx.sessionKey, observedWorkspace);
@@ -159,7 +164,8 @@ export default definePluginEntry({
       // before_prompt_build does not expose workspaceDir on every OpenClaw
       // runtime. The first spawn objective is the reliable native seam and
       // normally carries the task/product context prepared by the coordinator.
-      const parent = ctx.sessionKey ?? "unknown-parent";
+      const parent = ctx.sessionKey ?? (event as any).sessionKey ?? (event as any).requesterSessionKey
+        ?? `workspace:${observedWorkspace || "unknown"}`;
       const runId = runBySession.get(parent) ?? parent;
       // Keep every spawn in a root session on one stable project identity.
       // Child objectives vary by role, so hashing each spawn's task text
@@ -331,6 +337,11 @@ export default definePluginEntry({
           producerIds?: string[]; consumerIds?: string[]; verificationSubject?: string;
           verificationCommand?: string;
         };
+        const workflowArtifacts = new Set(["plan.md", "solution.py", "implementation.md", "review.md"]);
+        if (params.kind === "dependency" && ((params.artifactIds ?? []).some((id) => workflowArtifacts.has(id))
+          || /artifact-readiness$/i.test(params.subject ?? ""))) {
+          throw new Error("workflow dependency readiness is observer-owned and cannot be changed with this tool");
+        }
         const memory = {
           id: params.id,
           kind: params.kind as MemoryKind,

@@ -564,6 +564,7 @@ export class MemoryEngine {
     const consumer = normalizeIdentity(consumerId);
     const dependency = await this.load("dependency");
     return dependency.items.filter((item) => inContext(item, projectId, runId))
+      .filter((item) => !projectId || !runId || Boolean(item.projectId && item.runId))
       .filter((item) => normalizedSet(item.consumerIds).includes(consumer))
       .filter((item) => item.verificationCommand
         ? item.lifecycleState !== "verified" && item.lifecycleState !== "ready"
@@ -658,6 +659,7 @@ export class MemoryEngine {
   async completionBlockers(projectId: string, runId: string): Promise<MemoryItem[]> {
     const dependency = await this.load("dependency");
     const artifactBlockers = dependency.items.filter((item) => inContext(item, projectId, runId))
+      .filter((item) => Boolean(item.projectId && item.runId))
       .filter((item) => (item.consumerIds ?? []).some((consumer) =>
         ["completion", "coordinator"].includes(normalizeIdentity(consumer))))
       .filter((item) => item.verificationCommand
