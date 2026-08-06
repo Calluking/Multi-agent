@@ -22,6 +22,13 @@ export type MemoryItem = {
   ownerSessionKey?: string;
   targetRoles?: string[];
   participants?: string[];
+  projectId?: string;
+  artifactIds?: string[];
+  interfaceId?: string;
+  subject?: string;
+  producerIds?: string[];
+  consumerIds?: string[];
+  verificationSubject?: string;
   priority?: number;
   version?: number;
   status?: string;
@@ -88,6 +95,51 @@ function isProductCodomain(item: MemoryItem): boolean {
   if (!producer || !consumer) return false;
   const endpoints = `${producer}\n${consumer}`;
   return !/\b(planner|planning|implementer|implementation|reviewer|review|verification|tooling)\b|plan\.md|solution\.py|implementation\.md|review\.md/i.test(endpoints);
+}
+
+function normalizeIdentity(value: string): string {
+  return value.toLowerCase().replace(/\\/g, "/").replace(/\s+/g, " ").trim();
+}
+
+function normalizedSet(values: string[] | undefined): string[] {
+  return [...new Set((values ?? []).map(normalizeIdentity).filter(Boolean))].sort();
+}
+
+function definedFields<T extends object>(value: T): Partial<T> {
+  return Object.fromEntries(Object.entries(value).filter(([, field]) => field !== undefined)) as Partial<T>;
+}
+
+export function canonicalKey(item: MemoryItem): string {
+  const project = normalizeIdentity(item.projectId ?? "");
+  const owner = item.scope === "private" ? normalizeIdentity(item.ownerSessionKey ?? "") : "shared";
+  const artifacts = normalizedSet(item.artifactIds).join("|");
+  if (project) {
+    if (item.kind === "dependency" && (item.subject || artifacts)) {
+      return ["v1", item.kind, project, normalizeIdentity(item.subject ?? ""), artifacts, owner].join("::");
+    }
+    if (item.kind === "codomain" && (item.interfaceId || artifacts)) {
+      return ["v1", item.kind, project, normalizeIdentity(item.interfaceId ?? ""), artifacts, owner].join("::");
+    }
+    if (item.kind === "testing" && item.verificationSubject) {
+      return ["v1", item.kind, project, normalizeIdentity(item.verificationSubject),
+        normalizedSet(item.targetRoles).join("|"), owner].join("::");
+    }
+  }
+
+  // Old banks remain readable and retain exact normalized deduplication until
+  // a record is updated with explicit structured identity.
+  const normalize = (value: string) => value.toLowerCase().replace(/\s+/g, " ").trim();
+  const tags = [...new Set((item.tags ?? []).map((tag) => tag.toLowerCase().trim()))].sort();
+  const roles = [...new Set((item.targetRoles ?? []).map((role) => role.toLowerCase().trim()))].sort();
+  return ["legacy",
+    item.kind,
+    item.scope,
+    normalize(item.title),
+    normalize(item.text),
+    tags.join("|"),
+    roles.join("|"),
+    item.ownerSessionKey ?? "",
+  ].join("::");
 }
 
 export class MemoryEngine {
@@ -167,9 +219,22 @@ export class MemoryEngine {
     return this.withWriteLock(item.kind, async () => {
       const bank = await this.load(item.kind);
       const stored = { ...item, updatedAt: new Date().toISOString() };
-      const index = bank.items.findIndex((candidate) => candidate.id === item.id);
-      if (index >= 0) bank.items[index] = stored;
-      else bank.items.push(stored);
+      const exactIndex = bank.items.findIndex((candidate) => candidate.id === item.id);
+      if (exactIndex >= 0) {
+        bank.items[exactIndex] = { ...bank.items[exactIndex], ...definedFields(stored) };
+        await this.save(item.kind, bank);
+        return bank.items[exactIndex];
+      }
+
+      const fp = canonicalKey(stored);
+      const semIndex = bank.items.findIndex((candidate) => canonicalKey(candidate) === fp);
+      if (semIndex >= 0) {
+        bank.items[semIndex] = { ...stored, id: bank.items[semIndex].id };
+        await this.save(item.kind, bank);
+        return bank.items[semIndex];
+      } else {
+        bank.items.push(stored);
+      }
       await this.save(item.kind, bank);
       return stored;
     });
@@ -182,18 +247,21 @@ export class MemoryEngine {
     if (this.config.dependencyEnabled && await empty("dependency")) {
       await this.upsert({
         id: `${project}:plan-artifact`, kind: "dependency", scope: "private",
+        projectId: project, artifactIds: ["plan.md"], subject: "plan-artifact-readiness",
         title: `${project} planning target`, targetRoles: ["planner", "implementer"], priority: 100,
         text: "Required before=implementation; Required state=plan.md exists and reflects TASK.md; Observed=missing; Evidence=workspace file check; Blocker=plan.md absent; Next action=write and inspect plan.md",
         status: "unresolved", evidence: [], tags: [project, "artifact", "plan.md"],
       });
       await this.upsert({
         id: `${project}:implementation-artifacts`, kind: "dependency", scope: "private",
+        projectId: project, artifactIds: ["solution.py", "implementation.md"], subject: "implementation-artifact-readiness",
         title: `${project} implementation target`, targetRoles: ["implementer", "reviewer"], priority: 100,
         text: "Required before=review; Required state=solution.py and implementation.md exist; Observed=missing; Evidence=workspace file check and executable command; Blocker=implementation artifacts absent; Next action=implement the complete TASK.md scope and run its primary verification",
         status: "unresolved", evidence: [], tags: [project, "artifact", "solution.py", "implementation.md"],
       });
       await this.upsert({
         id: `${project}:review-artifact`, kind: "dependency", scope: "private",
+        projectId: project, artifactIds: ["review.md"], subject: "review-artifact-readiness",
         title: `${project} verification target`, targetRoles: ["reviewer"], priority: 100,
         text: "Required before=completion; Required state=review.md records an independently executed command, exit status, and result; Observed=missing; Evidence=workspace file check; Blocker=review evidence absent; Next action=run independent verification, repair material failures, and record exact evidence",
         status: "unresolved", evidence: [], tags: [project, "artifact", "review.md", "verification"],
@@ -202,12 +270,14 @@ export class MemoryEngine {
     if (this.config.testingEnabled && await empty("testing")) {
       await this.upsert({
         id: `${project}:implementer-verification-practice`, kind: "testing", scope: "shared",
+        projectId: project, verificationSubject: "implementation-public-interface",
         title: "Incremental public-interface verification", targetRoles: ["implementer"], priority: 80,
         text: "Responsibility=implementer; Trigger=multi-stage implementation or explicit ordering; Command=run executable checks after each implemented slice and the primary end-to-end path; Pass evidence=exit 0 plus assertions on observable public behavior; Failure action=diagnose and revise before handoff",
         status: "required", evidence: [], tags: [project, "role:implementer", "verification", "end-to-end"],
       });
       await this.upsert({
         id: `${project}:reviewer-verification-practice`, kind: "testing", scope: "shared",
+        projectId: project, verificationSubject: "independent-boundary-verification",
         title: "Independent boundary and negative verification", targetRoles: ["reviewer"], priority: 90,
         text: "Responsibility=reviewer; Trigger=review or executable verification; Command=run the documented entrypoint and independent happy-path, invalid-input, ordering, and cross-boundary checks; Pass evidence=exact command, exit status, assertion counts, and observed result; Failure action=repair material failures and rerun before approval",
         status: "required", evidence: [], tags: [project, "role:reviewer", "verification", "boundary"],
@@ -219,6 +289,8 @@ export class MemoryEngine {
       && /registration|profile/i.test(taskText) && /feedback|rating|review/i.test(taskText)) {
       await this.upsert({
         id: `${project}:experience-feedback-contract`, kind: "codomain", scope: "shared",
+        projectId: project, interfaceId: "experience-to-feedback", artifactIds: ["feedback-api"],
+        producerIds: ["experience modules"], consumerIds: ["feedback and rating module"],
         title: "Experience modules to feedback boundary", targetRoles: ["implementer", "reviewer"],
         participants: ["experience modules", "feedback and rating module"], priority: 85, version: 1,
         text: "Producer domain=experience modules; Consumer domain=feedback and rating module; Shared data=target_type, target_id, participant user_id, completion state; Obligations=producer exposes stable existing experience identity and consumer rejects unknown or inaccessible targets; Invariant=feedback refers to a real completed tour, exchange, or workshop and rating remains within the declared range; Boundary test=create each real experience, submit feedback, then reject unknown id/type without side effects",
@@ -226,6 +298,8 @@ export class MemoryEngine {
       });
       await this.upsert({
         id: `${project}:identity-feature-contract`, kind: "codomain", scope: "shared",
+        projectId: project, interfaceId: "identity-to-protected-features", artifactIds: ["registered-user-identity"],
+        producerIds: ["registration and profile module"], consumerIds: ["tour language and workshop modules"],
         title: "Registration identity to protected features", targetRoles: ["implementer", "reviewer"],
         participants: ["registration and profile module", "tour language and workshop modules"], priority: 80, version: 1,
         text: "Producer domain=registration and profile module; Consumer domain=tour language and workshop modules; Shared data=user_id, profile identity, cultural interests and languages; Obligations=producer returns a stable registered identity and consumers validate it before mutation; Invariant=no protected feature state is created for an unknown user; Boundary test=perform each feature with a registered user, then reject an unknown user while preserving state",
@@ -254,6 +328,7 @@ export class MemoryEngine {
       for (const assignment of assignments) {
         await this.upsert({
           id: `${taskTag}:assignment:${assignment.id}`, kind: "dependency", scope: "private",
+          projectId: project, artifactIds: assignment.files, subject: `assignment:${assignment.id}:handoff`,
           title: `${assignment.id} deliverable state`, targetRoles: [assignment.id], priority: 90,
           text: `Required before=assignment handoff; Required state=${assignment.title} implemented in ${assignment.files.join(", ") || "assigned artifact"}; Observed=missing; Evidence=patch and assignment tests; Blocker=assigned feature not yet evidenced; Next action=implement only ${assignment.id}, preserve partner-owned semantics, and report changed API/artifact plus test evidence`,
           status: "unresolved", evidence: [], tags: [taskTag, `assignment:${assignment.id}`, ...assignment.files],
@@ -264,6 +339,9 @@ export class MemoryEngine {
       const left = assignments[0], right = assignments[1];
       await this.upsert({
         id: `${taskTag}:shared-artifact:${sharedFiles.join("+")}`, kind: "codomain", scope: "shared",
+        projectId: project, artifactIds: sharedFiles,
+        interfaceId: `shared-artifact:${sharedFiles.join("+")}`,
+        producerIds: [left.id], consumerIds: [right.id],
         title: `Shared contract for ${sharedFiles.join(", ")}`, targetRoles: assignments.map((item) => item.id),
         participants: assignments.map((item) => item.id), priority: 100, version: 1,
         text: `Producer domain=${left.id} (${left.title}); Consumer domain=${right.id} (${right.title}); Shared data=${sharedFiles.join(", ")} public API signature, default behavior, validation order, and return shape; Obligations=each assignment changes only its feature semantics while preserving the partner option and backward-compatible defaults; Invariant=both options compose in one call without either feature overwriting the other's signature, token stream, errors, or return type; Boundary test=run each feature test independently, then call the shared API with both options enabled and verify both behaviors simultaneously`,
@@ -274,6 +352,8 @@ export class MemoryEngine {
       for (const assignment of assignments) {
         await this.upsert({
           id: `${taskTag}:testing:${assignment.id}`, kind: "testing", scope: "shared",
+          projectId: project, artifactIds: sharedFiles,
+          verificationSubject: `assignment:${assignment.id}:composition`,
           title: `${assignment.id} independent and composition verification`, targetRoles: [assignment.id], priority: 90,
           text: `Responsibility=${assignment.id}; Trigger=shared artifact or API modified by another assignment; Command=run baseline tests, ${assignment.id} feature tests, and a composition check combining both assignments; Pass evidence=exact commands and assertions showing own feature, partner defaults, and joint behavior; Failure action=revise only the conflicting boundary and rerun before handoff`,
           status: "required", evidence: [], tags: [taskTag, `assignment:${assignment.id}`, "composition", ...sharedFiles],

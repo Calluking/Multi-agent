@@ -14,6 +14,13 @@ const RecordParameters = Type.Object({
   tags: Type.Optional(Type.Array(Type.String())),
   targetRoles: Type.Optional(Type.Array(Type.String(), { description: "Roles that should receive this item, for example implementer or reviewer." })),
   participants: Type.Optional(Type.Array(Type.String(), { description: "Product components/domains that share this contract." })),
+  projectId: Type.Optional(Type.String({ description: "Stable project or task identity used for canonicalization." })),
+  artifactIds: Type.Optional(Type.Array(Type.String(), { description: "Stable repository-relative artifact paths or API artifact identities." })),
+  interfaceId: Type.Optional(Type.String({ description: "Stable producer-consumer interface identity for co-domain contracts." })),
+  subject: Type.Optional(Type.String({ description: "Stable obligation or dependency subject identity." })),
+  producerIds: Type.Optional(Type.Array(Type.String(), { description: "Assignments or components that produce this artifact or interface." })),
+  consumerIds: Type.Optional(Type.Array(Type.String(), { description: "Assignments or components that consume this artifact or interface." })),
+  verificationSubject: Type.Optional(Type.String({ description: "Stable behavior, artifact, or interface verified by a testing record." })),
   priority: Type.Optional(Type.Number()),
   version: Type.Optional(Type.Number()),
   evidence: Type.Optional(Type.Array(Type.String())),
@@ -50,6 +57,7 @@ export default definePluginEntry({
           "[Multi-Agent Memory Plugin — task-local initialization]",
           "Memory is sparse and fail-open. Do not create a record merely to satisfy the plugin, and never delay the first Planner spawn because a bank is empty.",
           "The plugin initializes canonical task-local records at the first spawn. Do not create duplicate records. Before a later child, inspect memory and update the existing canonical id only when you have new workspace/command evidence or a contract challenge.",
+          "Canonical identity is structured, not prose-derived. Set projectId on task records; artifactIds to repository-relative paths or stable API artifacts; subject on dependency obligations; interfaceId plus producerIds/consumerIds on co-domain contracts; and verificationSubject on testing records. Records with the same kind-specific identity update one canonical entry even when their title or wording differs.",
           "Dependency format: `Required before=<consumer stage>; Required state=<artifact/product state>; Observed=<present|missing|invalid>; Evidence=<observable check/result>; Blocker=<exact current blocker or null>; Next action=<one recovery action>`. Set targetRoles to only the Agent that owns the next action. This memory tracks runtime state; it does not globally gate sessions_spawn.",
           "Co-domain format: `Producer domain=<product component>; Consumer domain=<different product component>; Shared data=<fields and meanings>; Obligations=<both sides>; Invariant=<cross-boundary rule>; Boundary test=<setup, action, observable result>`. Set participants to the two product components and targetRoles only to Agents implementing or verifying this boundary. Use status proposed/challenged/agreed/verified and increment version on revision. Never model Planner/Implementer/Reviewer handoff as a co-domain contract.",
           "Testing format: `Responsibility=<role>; Trigger=<task signal>; Command=<executable check>; Pass evidence=<exit/output/assertion>; Failure action=<diagnose and revise before handoff>`. Set targetRoles. It is inject-only: no retry, rerouting, or spawn gate.",
@@ -106,6 +114,8 @@ export default definePluginEntry({
         id: `episode:${record.injectionId}`,
         kind: "testing",
         scope: "shared",
+        projectId: "runtime-episodes",
+        verificationSubject: `episode:${record.injectionId}`,
         title: "Subagent execution episode",
         text: `outcome=${event.outcome ?? event.reason ?? "unknown"}; selected=${JSON.stringify(record.selected)}`,
         status: event.outcome ?? event.reason ?? "unknown",
@@ -125,6 +135,8 @@ export default definePluginEntry({
           id: string; kind: MemoryKind; scope: "private" | "shared";
           title: string; text: string; status?: string; tags?: string[]; evidence?: string[];
           targetRoles?: string[]; participants?: string[]; priority?: number; version?: number;
+          projectId?: string; artifactIds?: string[]; interfaceId?: string; subject?: string;
+          producerIds?: string[]; consumerIds?: string[]; verificationSubject?: string;
         };
         const stored = await engine.upsert({
           id: params.id,
@@ -136,6 +148,13 @@ export default definePluginEntry({
           tags: params.tags,
           targetRoles: params.targetRoles,
           participants: params.participants,
+          projectId: params.projectId,
+          artifactIds: params.artifactIds,
+          interfaceId: params.interfaceId,
+          subject: params.subject,
+          producerIds: params.producerIds,
+          consumerIds: params.consumerIds,
+          verificationSubject: params.verificationSubject,
           priority: params.priority,
           version: params.version,
           evidence: params.evidence,
