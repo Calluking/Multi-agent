@@ -145,6 +145,17 @@ function normalizeIdentity(value: string): string {
   return value.toLowerCase().replace(/\\/g, "/").replace(/\s+/g, " ").trim();
 }
 
+export function canonicalVerificationCommand(command: string, workspace: string): string {
+  const segments = command.trim().split(/\s*&&\s*/);
+  if (segments.length > 1) {
+    const cd = segments[0].match(/^cd\s+(["']?)(.+?)\1$/i);
+    if (cd && resolve(cd[2]) === resolve(workspace)) {
+      return normalizeIdentity(segments.slice(1).join(" && "));
+    }
+  }
+  return normalizeIdentity(command);
+}
+
 function normalizedSet(values: string[] | undefined): string[] {
   return [...new Set((values ?? []).map(normalizeIdentity).filter(Boolean))].sort();
 }
@@ -513,7 +524,8 @@ export class MemoryEngine {
     for (const item of dependency.items) {
       if (!inContext(item, input.projectId, input.runId)) continue;
       if (!item.verificationCommand
-        || normalizeIdentity(item.verificationCommand) !== normalizeIdentity(command)) continue;
+        || canonicalVerificationCommand(item.verificationCommand, workspace)
+          !== canonicalVerificationCommand(command, workspace)) continue;
       const artifacts = item.artifactIds ?? [];
       if (!artifacts.length) continue;
       const observations = await Promise.all(artifacts.map((artifact) =>
@@ -634,7 +646,10 @@ export class MemoryEngine {
         assignmentId: assignment,
         workDirectory,
         artifactIds: artifacts,
-        targetRoles: [assignment],
+        // Preserve downstream consumers already attached to a prerequisite.
+        // Replacing targetRoles with only the producer prevents the observer
+        // from refreshing that record when the consumer is about to spawn.
+        targetRoles: [...new Set([...(item.targetRoles ?? []), assignment])],
       }));
     }
     return updated;
@@ -726,7 +741,7 @@ export class MemoryEngine {
         ...sections,
         recoveryDirective,
         `Target role: ${role ?? "unclassified"}. Only records relevant to this role/boundary were selected.`,
-        "Use these records as current working context. Dependency records describe state, not permission to invent missing evidence. Co-domain records describe producer/consumer semantics, not Agent handoffs. Testing records are inject-only practices and add no retries or rerouting. If a record is wrong or stale, report a typed update through multiagent_memory_record instead of silently ignoring it.",
+        "Use these records as current working context. Dependency readiness is observer-owned: never update it through a memory or contract tool. Co-domain records describe product/API semantics, not Agent handoffs; use multiagent_contract_transition only for a lifecycle change to an explicitly selected co-domain record. Testing records define evidence standards.",
         "--- END MULTI-AGENT MEMORY CONTEXT ---",
       ].join("\n\n"),
     };

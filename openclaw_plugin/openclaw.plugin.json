@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "activation": { "onStartup": true },
   "contracts": {
-    "tools": ["multiagent_memory_record", "multiagent_memory_inspect"]
+    "tools": ["multiagent_memory_record", "multiagent_memory_inspect", "multiagent_contract_transition"]
   },
   "skills": ["skills"],
   "configSchema": {

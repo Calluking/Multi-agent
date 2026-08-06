@@ -28,6 +28,9 @@ write \`peer_token/PATCH_READY.md\``;
     || !item.artifactIds.includes("peer_token/PATCH_READY.md")) {
     throw new Error(`owned artifacts not normalized: ${item.artifactIds.join(",")}`);
   }
+  if (!item.targetRoles.includes("token-owner")) {
+    throw new Error(`producer role lost during assignment registration: ${item.targetRoles.join(",")}`);
+  }
   const other = (await engine.load("dependency")).items.find((entry) => entry.producerIds?.includes("position-owner"));
   if (other.artifactIds.some((artifact) => artifact.startsWith("peer_token/"))) {
     throw new Error(`assignment path leaked to peer owner: ${JSON.stringify(other)}`);

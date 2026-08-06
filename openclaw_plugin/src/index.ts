@@ -46,11 +46,28 @@ const RecordParameters = Type.Object({
   priority: Type.Optional(Type.Number()),
   version: Type.Optional(Type.Number()),
   evidence: Type.Optional(Type.Array(Type.String())),
-  action: Type.Optional(Type.Union([
+});
+
+const ContractTransitionParameters = Type.Object({
+  id: Type.String(),
+  scope: Type.Union([Type.Literal("private"), Type.Literal("shared")]),
+  title: Type.String(),
+  text: Type.String(),
+  action: Type.Union([
     Type.Literal("propose"), Type.Literal("challenge"), Type.Literal("revise"),
     Type.Literal("accept"), Type.Literal("verify"),
-  ], { description: "Typed co-domain contract lifecycle action." })),
-  baseVersion: Type.Optional(Type.Number({ description: "Current version being challenged, revised, accepted, or verified." })),
+  ]),
+  baseVersion: Type.Optional(Type.Number()),
+  projectId: Type.String(),
+  runId: Type.Optional(Type.String()),
+  artifactIds: Type.Array(Type.String()),
+  interfaceId: Type.String(),
+  producerIds: Type.Array(Type.String()),
+  consumerIds: Type.Array(Type.String()),
+  targetRoles: Type.Optional(Type.Array(Type.String())),
+  participants: Type.Optional(Type.Array(Type.String())),
+  priority: Type.Optional(Type.Number()),
+  evidence: Type.Optional(Type.Array(Type.String())),
 });
 
 export default definePluginEntry({
@@ -71,8 +88,10 @@ export default definePluginEntry({
     const pendingByParent = new Map<string, PendingInjection[]>();
     const childLedger = new Map<string, PendingInjection>();
     const initializedRootSessions = new Set<string>();
+    const rootSessionKeys = new Set<string>();
     const workspaceBySession = new Map<string, string>();
     const projectBySession = new Map<string, string>();
+    const projectByRun = new Map<string, string>();
     const runBySession = new Map<string, string>();
 
     if (engine.config.autoInitialize) {
@@ -80,8 +99,14 @@ export default definePluginEntry({
         const prompt = String(event?.prompt ?? event?.userPrompt ?? event?.message ?? "");
         if (!prompt || prompt.startsWith("/") || prompt.includes("[Subagent Context]")) return event;
         const sessionKey = String(ctx?.sessionKey ?? event?.sessionKey ?? "");
+        const isChildSession = Boolean(ctx?.requesterSessionKey ?? event?.requesterSessionKey)
+          || sessionKey.includes(":subagent:");
+        if (isChildSession) return event;
         if (sessionKey && initializedRootSessions.has(sessionKey)) return event;
-        if (sessionKey) initializedRootSessions.add(sessionKey);
+        if (sessionKey) {
+          initializedRootSessions.add(sessionKey);
+          rootSessionKeys.add(sessionKey);
+        }
         const workspace = String(ctx?.workspaceDir ?? event?.workspaceDir ?? "");
         if (workspace) {
           try {
@@ -91,21 +116,18 @@ export default definePluginEntry({
             if (sessionKey) {
               projectBySession.set(sessionKey, projectId);
               runBySession.set(sessionKey, sessionKey);
+              projectByRun.set(sessionKey, projectId);
             }
           } catch {
             // Memory initialization is fail-open; the original task proceeds.
           }
         }
         const context = [
-          "[Multi-Agent Memory Plugin — task-local initialization]",
-          "Memory is sparse and fail-open. Do not create a record merely to satisfy the plugin, and never delay the first Planner spawn because a bank is empty.",
-          "The plugin initializes canonical task-local records at the first spawn. Do not create duplicate records. Before a later child, inspect memory and update the existing canonical id only when you have new workspace/command evidence or a contract challenge.",
-          "Canonical identity is structured, not prose-derived. Set projectId on task records; artifactIds to repository-relative paths or stable API artifacts; subject on dependency obligations; interfaceId plus producerIds/consumerIds on co-domain contracts; and verificationSubject on testing records. Records with the same kind-specific identity update one canonical entry even when their title or wording differs.",
-          "Dependency format: `Required before=<consumer stage>; Required state=<artifact/product state>; Observed=<present|missing|invalid>; Evidence=<observable check/result>; Blocker=<exact current blocker or null>; Next action=<one recovery action>`. Set targetRoles to only the Agent that owns the next action. This memory tracks runtime state; it does not globally gate sessions_spawn.",
-          "Co-domain format: `Producer domain=<product component>; Consumer domain=<different product component>; Shared data=<fields and meanings>; Obligations=<both sides>; Invariant=<cross-boundary rule>; Boundary test=<setup, action, observable result>`. Set participants to the two product components and targetRoles only to Agents implementing or verifying this boundary. Use status proposed/challenged/agreed/verified and increment version on revision. Never model Planner/Implementer/Reviewer handoff as a co-domain contract.",
-          "Testing format: `Responsibility=<role>; Trigger=<task signal>; Command=<executable check>; Pass evidence=<exit/output/assertion>; Failure action=<diagnose and revise before handoff>`. Set targetRoles. It is inject-only: no retry, rerouting, or spawn gate.",
-          "Before each later child spawn, observe the expected workspace artifact/command result and update any relevant dependency or contract record. If there is no relevant co-domain boundary, create no co-domain record.",
-          "Use task-specific stable ids prefixed with the task/project name. Keep records concise. This policy must not change requested Agent roles, workflow, retries, or deliverables.",
+          "[Multi-Agent Memory Plugin — automatic control plane]",
+          "Follow the requested agent workflow directly. Spawn the assigned producer when its inputs are ready, wait for its artifact, then retry the intended downstream spawn.",
+          "Do not inspect or edit the plugin store, and do not call memory tools to mark dependency artifacts ready, resolved, accepted, or verified. The plugin observes files and command results automatically at spawn and completion boundaries.",
+          "If a spawn is blocked, follow the gate reason: resume the named recovery owner, make a materially changed repair, rerun the stated verification, then retry the blocked spawn.",
+          "Use multiagent_contract_transition only when a child packet explicitly identifies a shared product/API contract requiring proposal, revision, acceptance, or real boundary verification. Never use contract transitions for workflow artifacts such as plan.md, solution.py, implementation.md, review.md, or PATCH_READY.md.",
         ].join("\n");
         return {
           ...event,
@@ -117,21 +139,50 @@ export default definePluginEntry({
     }
 
     api.on("before_tool_call", async (event, ctx) => {
-      const observedWorkspace = String((ctx as any)?.workspaceDir ?? event.params.workdir
+      let observedWorkspace = String((ctx as any)?.workspaceDir ?? event.params.workdir
         ?? event.params.cwd ?? "");
       if (ctx.sessionKey && observedWorkspace) workspaceBySession.set(ctx.sessionKey, observedWorkspace);
       if (event.toolName !== "sessions_spawn") return;
       const task = typeof event.params.task === "string" ? event.params.task : "";
       if (!task.trim()) return;
+      if (!observedWorkspace) {
+        // Coordinators commonly state the assigned workspace explicitly in a
+        // native spawn objective even when the hook context omits workspaceDir.
+        // Recover that path so artifact readiness remains observer-owned.
+        observedWorkspace = task.match(/(?:working|work)\s+(?:only\s+)?in\s+`?(\/[^`\s),]+)/i)?.[1]?.trim()
+          ?? task.match(/workspace(?:\s+root)?[^/\n]*(\/[^)\n]+)/i)?.[1]?.trim()
+          ?? "";
+      }
+      if (ctx.sessionKey && observedWorkspace) {
+        workspaceBySession.set(ctx.sessionKey, observedWorkspace);
+      }
       // before_prompt_build does not expose workspaceDir on every OpenClaw
       // runtime. The first spawn objective is the reliable native seam and
       // normally carries the task/product context prepared by the coordinator.
       const parent = ctx.sessionKey ?? "unknown-parent";
       const runId = runBySession.get(parent) ?? parent;
-      const projectId = await engine.initializeFromTask(task, runId);
+      // Keep every spawn in a root session on one stable project identity.
+      // Child objectives vary by role, so hashing each spawn's task text
+      // creates a fresh dependency graph and makes produced prerequisites
+      // appear missing again. Prefer the root TASK.md when it is available.
+      let projectId = projectBySession.get(parent) ?? projectByRun.get(runId);
+      if (!projectId) {
+        let projectTask = task;
+        if (observedWorkspace) {
+          try {
+            projectTask = await readFile(resolve(observedWorkspace, "TASK.md"), "utf8");
+          } catch {
+            // Fall back to the spawn objective when no task artifact exists.
+          }
+        }
+        projectId = await engine.initializeFromTask(projectTask, runId);
+      }
       projectBySession.set(parent, projectId);
       runBySession.set(parent, runId);
-      const workspace = String((ctx as any)?.workspaceDir ?? "");
+      projectByRun.set(runId, projectId);
+      // Native sessions_spawn commonly provides workdir/cwd on the tool call
+      // while omitting workspaceDir from hook context.
+      const workspace = observedWorkspace;
       const role = task.toLowerCase().includes("reviewer") ? "reviewer"
         : task.toLowerCase().includes("implementer") ? "implementer"
           : task.toLowerCase().includes("planner") ? "planner" : undefined;
@@ -199,7 +250,8 @@ export default definePluginEntry({
 
     api.on("before_agent_finalize", async (event) => {
       const sessionKey = event.sessionKey ?? "";
-      if (!sessionKey || childLedger.has(sessionKey) || event.stopHookActive) return;
+      if (!sessionKey || sessionKey.includes(":subagent:")
+        || !rootSessionKeys.has(sessionKey) || event.stopHookActive) return;
       const terminalIntent = /\b(done|complete|completed|finished|final|successfully|all tests pass(?:ed)?)\b/i
         .test(event.lastAssistantMessage ?? "");
       if (!terminalIntent) return;
@@ -278,7 +330,6 @@ export default definePluginEntry({
           projectId?: string; runId?: string; artifactIds?: string[]; interfaceId?: string; subject?: string;
           producerIds?: string[]; consumerIds?: string[]; verificationSubject?: string;
           verificationCommand?: string;
-          action?: ContractAction; baseVersion?: number;
         };
         const memory = {
           id: params.id,
@@ -303,10 +354,31 @@ export default definePluginEntry({
           version: params.version,
           evidence: params.evidence,
         };
-        const stored = params.action
-          ? await engine.applyContractAction(memory, params.action, params.baseVersion)
-          : await engine.upsert(memory);
+        const stored = await engine.upsert(memory);
         return { content: [{ type: "text", text: `Stored ${stored.kind} memory ${stored.id}.` }], details: stored };
+      },
+    });
+
+    api.registerTool({
+      name: "multiagent_contract_transition",
+      label: "Transition Multi-Agent Contract",
+      description: "Apply a typed, version-checked lifecycle transition to a co-domain contract. Never use for dependency readiness.",
+      parameters: ContractTransitionParameters,
+      async execute(_id, rawParams) {
+        const params = rawParams as {
+          id: string; scope: "private" | "shared"; title: string; text: string;
+          action: ContractAction; baseVersion?: number; projectId: string; runId?: string;
+          artifactIds: string[]; interfaceId: string; producerIds: string[]; consumerIds: string[];
+          targetRoles?: string[]; participants?: string[]; priority?: number; evidence?: string[];
+        };
+        const stored = await engine.applyContractAction({
+          id: params.id, kind: "codomain", scope: params.scope, title: params.title, text: params.text,
+          projectId: params.projectId, runId: params.runId, artifactIds: params.artifactIds,
+          interfaceId: params.interfaceId, producerIds: params.producerIds, consumerIds: params.consumerIds,
+          targetRoles: params.targetRoles, participants: params.participants, priority: params.priority,
+          evidence: params.evidence,
+        }, params.action, params.baseVersion);
+        return { content: [{ type: "text", text: `Contract ${stored.id} is ${stored.status} at version ${stored.version}.` }], details: stored };
       },
     });
 
