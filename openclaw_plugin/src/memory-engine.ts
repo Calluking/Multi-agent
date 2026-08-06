@@ -30,13 +30,26 @@ export type MemoryItem = {
   producerIds?: string[];
   consumerIds?: string[];
   verificationSubject?: string;
+  verificationCommand?: string;
   lifecycleState?: "planned" | "in_progress" | "blocked" | "produced" | "verified" | "ready";
   artifactObservations?: ArtifactObservation[];
+  verificationAttempts?: VerificationAttempt[];
   priority?: number;
   version?: number;
   status?: string;
   evidence?: string[];
   updatedAt: string;
+};
+
+export type VerificationAttempt = {
+  command: string;
+  exitCode: number;
+  passed: boolean;
+  artifactVersions: Record<string, string>;
+  observedAt: string;
+  source: string;
+  output?: string;
+  error?: string;
 };
 
 export type ArtifactObservation = {
@@ -268,6 +281,7 @@ export class MemoryEngine {
       await this.upsert({
         id: `${project}:implementation-artifacts`, kind: "dependency", scope: "private",
         projectId: project, artifactIds: ["solution.py", "implementation.md"], subject: "implementation-artifact-readiness",
+        verificationCommand: "python3 solution.py",
         title: `${project} implementation target`, targetRoles: ["implementer", "reviewer"], priority: 100,
         text: "Required before=review; Required state=solution.py and implementation.md exist; Observed=missing; Evidence=workspace file check and executable command; Blocker=implementation artifacts absent; Next action=implement the complete TASK.md scope and run its primary verification",
         status: "unresolved", evidence: [], tags: [project, "artifact", "solution.py", "implementation.md"],
@@ -407,6 +421,49 @@ export class MemoryEngine {
         evidence: observed,
       });
     }
+  }
+
+  async recordVerification(workspace: string, input: {
+    command: string; exitCode: number; source?: string; output?: string; error?: string;
+  }): Promise<number> {
+    const command = input.command.trim();
+    if (!command) return 0;
+    const dependency = await this.load("dependency");
+    let updated = 0;
+    for (const item of dependency.items) {
+      if (!item.verificationCommand
+        || normalizeIdentity(item.verificationCommand) !== normalizeIdentity(command)) continue;
+      const artifacts = item.artifactIds ?? [];
+      if (!artifacts.length) continue;
+      const observations = await Promise.all(artifacts.map((artifact) =>
+        this.observeArtifact(workspace, artifact, input.source ?? "after-tool-call")));
+      const artifactVersions = Object.fromEntries(observations
+        .filter((entry) => entry.exists && entry.sha256)
+        .map((entry) => [entry.artifactId, entry.sha256 as string]));
+      const passed = input.exitCode === 0
+        && observations.every((entry) => entry.exists && Boolean(entry.sha256));
+      const attempt: VerificationAttempt = {
+        command,
+        exitCode: input.exitCode,
+        passed,
+        artifactVersions,
+        observedAt: new Date().toISOString(),
+        source: input.source ?? "after-tool-call",
+        output: input.output?.slice(0, 2000),
+        error: input.error?.slice(0, 2000),
+      };
+      await this.upsert({
+        ...item,
+        lifecycleState: passed ? "verified" : "blocked",
+        status: passed ? "verified" : "unresolved",
+        artifactObservations: observations,
+        verificationAttempts: [...(item.verificationAttempts ?? []), attempt].slice(-20),
+        evidence: [...(item.evidence ?? []),
+          `command=${command}; exit=${input.exitCode}; artifacts=${JSON.stringify(artifactVersions)}; passed=${passed}`].slice(-20),
+      });
+      updated += 1;
+    }
+    return updated;
   }
 
   private async observeArtifact(workspace: string, artifactId: string, source: string): Promise<ArtifactObservation> {

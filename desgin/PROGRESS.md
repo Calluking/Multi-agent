@@ -23,9 +23,9 @@ Status values: `DONE`, `PARTIAL`, `TODO`, `BLOCKED`.
 | Assignment and participant registry | PARTIAL | Arbitrary assignment IDs and capabilities are retained throughout a run |
 | Sparse assignment-aware retrieval | PARTIAL | Only relevant private records and shared boundary contracts reach each agent |
 | Spawn/completion episode correlation | DONE | Injection IDs correlate with real child session keys and outcomes |
-| Deterministic artifact observer | PARTIAL | File existence, size, mtime, SHA-256 version, workspace confinement, and stale-verification detection are implemented; tool/command observations remain |
-| Dependency state reconciler | PARTIAL | Missing → blocked and existing → produced work; verified/ready require the upcoming verification ledger |
-| Verification ledger | TODO | Exact command, artifact version, result, diagnosis, owner, repair, and rerun are persisted |
+| Deterministic artifact observer | PARTIAL | File and command-result observation work; incomplete-turn and lifecycle outcome projection remain |
+| Dependency state reconciler | PARTIAL | Missing → blocked, existing → produced, matching command success → verified, and edits → stale work; ready remains gated work |
+| Verification ledger | PARTIAL | Exact commands, exit codes, bounded output/error, artifact hashes, attempts, failures, and reruns persist; diagnosis and repair ownership remain |
 | Readiness gate | TODO | Consumers cannot use unresolved or stale prerequisites |
 | Recovery scheduler | TODO | A blocker creates a bounded repair opportunity for a capable owner using a changed strategy |
 | Same-command re-verification | TODO | A repair resolves a blocker only after the required command passes |
@@ -69,7 +69,7 @@ Do not use intermediate benchmark runs as substitutes for completing the archite
 
 ## Next implementation milestone
 
-Complete command/tool observation and the verification ledger. Artifact existence now advances a record only to `produced`; matching successful command evidence must advance the same artifact version to `verified`, and any later content hash change must invalidate that evidence.
+Complete lifecycle failure projection, diagnosis, and repair ownership, then build readiness/recovery gates. Artifact existence advances a record only to `produced`; matching successful command evidence advances the same artifact version to `verified`, and later content changes invalidate that evidence.
 
 Current observer evidence:
 
@@ -80,3 +80,14 @@ Current observer evidence:
 - unchanged verified artifacts retain verification;
 - content changes move verified artifacts back to `produced` with status `stale`;
 - `npm test` includes the artifact-observer regression suite.
+
+Verification-ledger evidence:
+
+- native `after_tool_call` observes commands, exit codes, bounded results, errors, and workspace identity;
+- only the exact configured verification command can affect its dependency record;
+- unrelated successful commands cannot verify artifacts;
+- failed matching commands create blocking attempts;
+- successful matching commands bind evidence to current SHA-256 artifact versions;
+- repeated attempts are retained as a bounded ledger;
+- post-verification edits invalidate the successful evidence;
+- `npm test` includes the verification-ledger regression suite.

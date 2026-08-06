@@ -4,6 +4,26 @@ import { resolve } from "node:path";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { MemoryEngine, type MemoryKind, type PluginConfig } from "./memory-engine.js";
 
+function numericExitCode(value: unknown, depth = 0): number | undefined {
+  if (depth > 4 || value === null || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  for (const key of ["exitCode", "exit_code", "code", "statusCode"]) {
+    if (typeof record[key] === "number") return record[key] as number;
+  }
+  for (const nested of Object.values(record)) {
+    const found = numericExitCode(nested, depth + 1);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+function commandFrom(params: Record<string, unknown>): string | undefined {
+  for (const key of ["command", "cmd", "code"]) {
+    if (typeof params[key] === "string" && params[key].trim()) return params[key].trim();
+  }
+  return undefined;
+}
+
 const RecordParameters = Type.Object({
   id: Type.String({ description: "Stable memory item id." }),
   kind: Type.Union([Type.Literal("dependency"), Type.Literal("codomain"), Type.Literal("testing")]),
@@ -21,6 +41,7 @@ const RecordParameters = Type.Object({
   producerIds: Type.Optional(Type.Array(Type.String(), { description: "Assignments or components that produce this artifact or interface." })),
   consumerIds: Type.Optional(Type.Array(Type.String(), { description: "Assignments or components that consume this artifact or interface." })),
   verificationSubject: Type.Optional(Type.String({ description: "Stable behavior, artifact, or interface verified by a testing record." })),
+  verificationCommand: Type.Optional(Type.String({ description: "Exact command whose result verifies the current artifact versions." })),
   priority: Type.Optional(Type.Number()),
   version: Type.Optional(Type.Number()),
   evidence: Type.Optional(Type.Array(Type.String())),
@@ -36,6 +57,7 @@ export default definePluginEntry({
     const pendingByParent = new Map<string, Array<{ injectionId: string; selected: Record<string, string[]> }>>();
     const childLedger = new Map<string, { injectionId: string; selected: Record<string, string[]> }>();
     const initializedRootSessions = new Set<string>();
+    const workspaceBySession = new Map<string, string>();
 
     if (engine.config.autoInitialize) {
       api.on("before_prompt_build", async (event: any, ctx: any) => {
@@ -74,6 +96,9 @@ export default definePluginEntry({
     }
 
     api.on("before_tool_call", async (event, ctx) => {
+      const observedWorkspace = String((ctx as any)?.workspaceDir ?? event.params.workdir
+        ?? event.params.cwd ?? "");
+      if (ctx.sessionKey && observedWorkspace) workspaceBySession.set(ctx.sessionKey, observedWorkspace);
       if (event.toolName !== "sessions_spawn") return;
       const task = typeof event.params.task === "string" ? event.params.task : "";
       if (!task.trim()) return;
@@ -96,6 +121,23 @@ export default definePluginEntry({
       queue.push({ injectionId, selected: { ...selected, role: inferredRole ? [inferredRole] : [] } });
       pendingByParent.set(parent, queue.slice(-20));
       return { params: { ...event.params, task: `${task}${packet}\nInjection id: ${injectionId}` } };
+    }, { priority: 80, timeoutMs: 10_000 });
+
+    api.on("after_tool_call", async (event, ctx) => {
+      const command = commandFrom(event.params);
+      if (!command) return;
+      const workspace = String((ctx as any)?.workspaceDir ?? event.params.workdir
+        ?? event.params.cwd ?? (ctx.sessionKey ? workspaceBySession.get(ctx.sessionKey) : "") ?? "");
+      if (!workspace) return;
+      const exitCode = event.error ? 1 : numericExitCode(event.result);
+      if (exitCode === undefined) return;
+      await engine.recordVerification(workspace, {
+        command,
+        exitCode,
+        source: `after-tool-call:${event.toolName}`,
+        output: event.result === undefined ? undefined : JSON.stringify(event.result),
+        error: event.error,
+      });
     }, { priority: 80, timeoutMs: 10_000 });
 
     api.on("subagent_spawned", async (event: any, ctx: any) => {
@@ -137,6 +179,7 @@ export default definePluginEntry({
           targetRoles?: string[]; participants?: string[]; priority?: number; version?: number;
           projectId?: string; artifactIds?: string[]; interfaceId?: string; subject?: string;
           producerIds?: string[]; consumerIds?: string[]; verificationSubject?: string;
+          verificationCommand?: string;
         };
         const stored = await engine.upsert({
           id: params.id,
@@ -155,6 +198,7 @@ export default definePluginEntry({
           producerIds: params.producerIds,
           consumerIds: params.consumerIds,
           verificationSubject: params.verificationSubject,
+          verificationCommand: params.verificationCommand,
           priority: params.priority,
           version: params.version,
           evidence: params.evidence,
