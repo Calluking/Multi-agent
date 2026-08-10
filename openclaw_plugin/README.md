@@ -45,6 +45,8 @@ The three banks have deliberately different jobs:
 
 ![Enforced lifecycle from assignment through producer checkpoint, consumer gate, and root completion](./docs/assets/enforced-lifecycle.svg)
 
+![Handoff sequence from spawn to verified completion](./docs/assets/handoff-sequence.svg)
+
 This producer-finalization checkpoint is important. Dependency memory does not merely tell a later reviewer that something is missing; it prevents the responsible child from ending after an acknowledgment when its owned artifact or verification obligation is still unresolved.
 
 ## Control-plane gates

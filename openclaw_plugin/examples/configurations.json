@@ -1,0 +1,22 @@
+{
+  "full": {
+    "dependencyEnabled": true,
+    "codomainEnabled": true,
+    "testingEnabled": true
+  },
+  "dependency-only": {
+    "dependencyEnabled": true,
+    "codomainEnabled": false,
+    "testingEnabled": false
+  },
+  "codomain-only": {
+    "dependencyEnabled": false,
+    "codomainEnabled": true,
+    "testingEnabled": false
+  },
+  "testing-only": {
+    "dependencyEnabled": false,
+    "codomainEnabled": false,
+    "testingEnabled": true
+  }
+}

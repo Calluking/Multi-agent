@@ -1,4 +1,42 @@
-# Runtime validation
+# Validation
+
+This document separates runtime/plugin validation from benchmark outcomes. Run the deterministic suite with:
+
+```bash
+npm test
+```
+
+## Regression suite
+
+| Area | Coverage |
+|---|---|
+| Workspace and assignment resolution | Native and universal workdir forms |
+| Memory persistence | Concurrent writes, deduplication, project/run isolation |
+| Handoffs | Artifact observation, readiness gates, bounded recovery |
+| Contracts | Proposal, revision, acceptance, stale-version rejection |
+| Evidence | Exact commands, artifact-version binding, invalidation |
+| Completion | Producer and root completion gates |
+
+All listed regression scripts pass on the current release branch.
+
+## Benchmark snapshot
+
+| Benchmark | Configuration | Result |
+|---|---|---|
+| MultiAgentBench task 1 | Testing-only ablation | 95/100 evaluator mean |
+| CooperBench task 0 | Testing-only ablation | 2/2 evaluator tests passed |
+| MultiAgentBench five-task panel | Repaired full plugin | 87/100 |
+| CooperBench five-task panel | Repaired full plugin | 20/100; one paired task passed |
+
+The panel scores are retained as honest baselines for future improvements. The focused co-domain work also passes the combined cross-feature composition test, while two individual feature semantics remain known follow-up work.
+
+## Reproduction
+
+Benchmark harnesses and raw reports live under the parent repository's `experiments/` and `desgin/FINAL_VALIDATION.md`. The plugin's own tests are self-contained and do not require benchmark model credentials.
+
+---
+
+## Historical runtime validation
 
 Validated on 2026-08-04 with OpenClaw 2026.6.10.
 
