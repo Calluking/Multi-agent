@@ -1,13 +1,19 @@
 {
-  "name": "@multi-agent/memory-plugin",
+  "name": "@multi-agent/contract-protocol",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Calluking/Multi-agent.git",
+    "directory": "openclaw_plugin"
+  },
+  "publishConfig": { "access": "public" },
   "type": "module",
   "files": ["dist", "skills", "openclaw.plugin.json", "README.md"],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node test/concurrency.mjs && node test/deduplication.mjs && node test/project-isolation.mjs && node test/assignment-adapter.mjs && node test/artifact-observer.mjs && node test/verification-ledger.mjs && node test/readiness-gate.mjs && node test/completion-gate.mjs && node test/contract-lifecycle.mjs && node test/targeting.mjs && node test/codomain-filter.mjs",
+    "test": "npm run build && node test/workspace-resolution.mjs && node test/concurrency.mjs && node test/deduplication.mjs && node test/project-isolation.mjs && node test/assignment-adapter.mjs && node test/dynamic-codomain.mjs && node test/artifact-observer.mjs && node test/verification-ledger.mjs && node test/readiness-gate.mjs && node test/completion-gate.mjs && node test/contract-lifecycle.mjs && node test/targeting.mjs && node test/codomain-filter.mjs",
     "plugin:build": "npm run build",
     "plugin:validate": "npm run check"
   },

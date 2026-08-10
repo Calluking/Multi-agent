@@ -1,0 +1,68 @@
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { MemoryEngine } from "../dist/memory-engine.js";
+
+const workspace = await mkdtemp(join(tmpdir(), "multiagent-memory-codomain-"));
+const store = join(workspace, ".memory");
+try {
+  const engine = new MemoryEngine({ storeRoot: store });
+  const task = `[Project click-compose]
+[Assignment timeout-owner]
+Title: editor timeout
+File: peer_a/PATCH_READY.md
+[Assignment shell-owner]
+Title: shell escaping
+File: peer_b/PATCH_READY.md`;
+  await engine.initializeFromTask(task, "run-1");
+  await engine.registerAssignment({ projectId: "click-compose", runId: "run-1",
+    assignmentId: "timeout-owner", workspace,
+    task: "work only in `peer_a/`; write `peer_a/PATCH_READY.md`" });
+  await engine.registerAssignment({ projectId: "click-compose", runId: "run-1",
+    assignmentId: "shell-owner", workspace,
+    task: "You are shell-owner. Your workspace is `./peer_b/` which is a repository copy." });
+  await mkdir(join(workspace, "peer_a"), { recursive: true });
+  await mkdir(join(workspace, "peer_b"), { recursive: true });
+  await writeFile(join(workspace, "peer_a", "PATCH_READY.md"), `# Ready
+## Changed API
+Public function \`click.edit()\` in \`src/click/termui.py\` adds \`timeout: int | None = None\`.
+The default must keep calling \`wait()\`; timeout raises \`ClickException("Editing timed out")\`.
+## Evidence
+$ python -m pytest tests/test_termui.py -q
+62 tests passed.\n`);
+  await writeFile(join(workspace, "peer_b", "PATCH_READY.md"), `# Ready
+## Changed API
+Public function \`click.edit()\` in \`src/click/termui.py\` adds \`escape_shell: bool = False\`.
+Forward it through \`src/click/_termui_impl.py\` without dropping existing parameters.
+## Evidence
+$ python -m pytest tests/test_termui.py -q
+19 tests passed.\n`);
+
+  const contract = await engine.discoverCoDomainFromHandoffs(workspace, "click-compose", "run-1");
+  if (!contract) throw new Error("separate handoffs did not create a co-domain contract");
+  if (contract.status !== "agreed") throw new Error(`unexpected state ${contract.status}`);
+  for (const expected of ["timeout: int | None = None", "escape_shell: bool = False",
+    "wait()", "src/click/termui.py", "same integrated tree"]) {
+    if (!contract.text.includes(expected)) throw new Error(`contract lost boundary fact: ${expected}`);
+  }
+  const context = await engine.integrationContext("click-compose", "run-1");
+  if (!context.includes(contract.id) || !context.includes("simultaneous acceptance criterion")
+    || !context.includes("multiagent_contract_transition")) {
+    throw new Error("integration turn did not receive enforceable contract context");
+  }
+  const blockers = await engine.completionBlockers("click-compose", "run-1");
+  if (!blockers.some((item) => item.id === contract.id)) {
+    throw new Error("unverified dynamic contract did not block completion");
+  }
+  await engine.recordCoDomainVerification(workspace, {
+    command: "cd " + workspace + " && python -m pytest tests/test_termui.py -q",
+    exitCode: 0, projectId: "click-compose", runId: "run-1",
+  });
+  const verified = (await engine.load("codomain")).items.find((item) => item.id === contract.id);
+  if (verified?.status !== "verified") {
+    throw new Error(`integration command did not verify contract: ${verified?.status}`);
+  }
+  console.log("PASS dynamic handoff discovery, integration injection, and verification gate");
+} finally {
+  await rm(workspace, { recursive: true, force: true });
+}

@@ -1,6 +1,6 @@
 import { access, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 
 export type MemoryKind = "dependency" | "codomain" | "testing";
 export type ContractAction = "propose" | "challenge" | "revise" | "accept" | "verify";
@@ -34,6 +34,7 @@ export type MemoryItem = {
   consumerIds?: string[];
   verificationSubject?: string;
   verificationCommand?: string;
+  verificationCommands?: string[];
   lifecycleState?: "planned" | "in_progress" | "blocked" | "produced" | "verified" | "ready";
   artifactObservations?: ArtifactObservation[];
   verificationAttempts?: VerificationAttempt[];
@@ -146,14 +147,18 @@ function normalizeIdentity(value: string): string {
 }
 
 export function canonicalVerificationCommand(command: string, workspace: string): string {
-  const segments = command.trim().split(/\s*&&\s*/);
+  const withoutExitEcho = command.trim().replace(
+    /\s*;\s*echo\s+["']?EXIT\s*=\s*\$\?["']?\s*$/i,
+    "",
+  );
+  const segments = withoutExitEcho.split(/\s*&&\s*/);
   if (segments.length > 1) {
     const cd = segments[0].match(/^cd\s+(["']?)(.+?)\1$/i);
     if (cd && resolve(cd[2]) === resolve(workspace)) {
       return normalizeIdentity(segments.slice(1).join(" && "));
     }
   }
-  return normalizeIdentity(command);
+  return normalizeIdentity(withoutExitEcho);
 }
 
 function normalizedSet(values: string[] | undefined): string[] {
@@ -429,7 +434,7 @@ export class MemoryEngine {
       const id = match[1].trim();
       const body = match[2].trim().split(/\n(?:Peer\s+\d+|taskName\/label|taskName|label)\s*:/i)[0].trim();
       const title = body.match(/(?:Title|Feature)\s*:\s*([^\n]+)/i)?.[1]?.trim() ?? id;
-      const files = [...body.matchAll(/`([^`]+\.[A-Za-z0-9]+)`|(?:Files? Modified|File)\s*:\s*[-*]?\s*([^\s,]+)/gi)]
+      const files = [...body.matchAll(/`([^`]+\.[A-Za-z0-9]+)`|(?:Artifact|Files? Modified|File)\s*:\s*[-*]?\s*([^\s,]+)/gi)]
         .map((entry) => (entry[1] ?? entry[2] ?? "").replace(/^[-*]\s*/, "").trim())
         .filter(Boolean);
       return { id, body, title, files: [...new Set(files)] };
@@ -476,6 +481,132 @@ export class MemoryEngine {
       }
     }
     return true;
+  }
+
+  /** Promote completed peer handoffs into a producer/consumer contract. */
+  async discoverCoDomainFromHandoffs(workspace: string, projectId: string,
+                                     runId: string): Promise<MemoryItem | undefined> {
+    if (!this.config.codomainEnabled) return undefined;
+    const dependency = await this.load("dependency");
+    const assignments = dependency.items
+      .filter((item) => inContext(item, projectId, runId) && item.assignmentId && item.workDirectory)
+      .filter((item, index, all) => all.findIndex((other) =>
+        normalizeIdentity(other.assignmentId ?? "") === normalizeIdentity(item.assignmentId ?? "")) === index);
+    if (assignments.length < 2) return undefined;
+
+    const handoffs: Array<{ assignment: string; directory: string; content: string; files: string[] }> = [];
+    for (const item of assignments) {
+      const directory = item.workDirectory as string;
+      const candidates = [
+        resolve(workspace, directory, "PATCH_READY.md"),
+        ...(item.artifactIds ?? []).filter((artifact) => /PATCH_READY\.md$/i.test(artifact))
+          .map((artifact) => resolve(workspace, artifact)),
+      ];
+      let content = "";
+      for (const path of [...new Set(candidates)]) {
+        try { content = await readFile(path, "utf8"); } catch { /* keep looking */ }
+        if (content.trim()) break;
+      }
+      if (!content.trim()) continue;
+      const files = [...content.matchAll(/`([^`\n]+\.[A-Za-z0-9]+)`|(?:^|\n)\s*[-*]?\s*([\w./-]+\.[A-Za-z0-9]+)\s*\|/g)]
+        .map((match) => (match[1] ?? match[2] ?? "").trim())
+        .filter((path) => path && !/PATCH_READY\.md$/i.test(path) && !/^https?:/i.test(path));
+      handoffs.push({ assignment: item.assignmentId as string, directory,
+        content: content.slice(0, 7000), files: [...new Set(files)].slice(0, 30) });
+    }
+    if (handoffs.length < 2) return undefined;
+
+    const artifactIds = [...new Set(handoffs.flatMap((handoff) => handoff.files))];
+    const participants = handoffs.map((handoff) => handoff.assignment);
+    const interfaceId = `handoff-composition:${participants.map(normalizeIdentity).sort().join("+")}`;
+    const id = `${projectId}:run:${createHash("sha256").update(runId).digest("hex").slice(0, 10)}:${interfaceId}`;
+    const render = (handoff: typeof handoffs[number]) => {
+      const boundary = handoff.content.replace(/^#.*$/m, "")
+        .split(/\n##\s+(?:Evidence|Tests?|How to Apply|Verification)/i)[0].trim().slice(0, 4500);
+      return `${handoff.assignment} producer contract (${handoff.directory}):\n${boundary}`;
+    };
+    const verificationCommands = [...new Set(handoffs.flatMap((handoff) =>
+      [...handoff.content.matchAll(/(?:^|\n)\s*(?:\$\s*)?([^\n]*\b(?:pytest|go\s+test|npm\s+test|cargo\s+test)\b[^\n]*)/gi)]
+        .map((match) => match[1].trim().replace(/^```(?:bash|sh)?\s*/i, ""))
+        .filter((command) => command.length > 3 && command.length < 500)))]
+      .slice(0, 6);
+    const text = [
+      `Producer domain=${participants.join(", ")}; Consumer domain=coordinator/integrator`,
+      `Shared data=${artifactIds.join(", ") || "public API signatures and runtime behavior declared in peer handoffs"}`,
+      "Obligations=integrate every peer's exact public signature, defaults, validation, errors, and return behavior; preserve parameters and semantics introduced by every producer; do not choose one peer implementation wholesale when both touch the same boundary",
+      "Invariant=each feature passes independently against the same integrated tree and their public API changes coexist without parameter loss, altered defaults, mock-call incompatibility, error-message drift, or overwritten behavior",
+      `Boundary test=apply both peer changes to one clean integration tree; run each peer's stated feature/boundary tests independently; add a joint call when both affect one API; required integration commands=${verificationCommands.join(" | ") || "derive and run each peer's stated feature test"}; record exact commands and results before verification`,
+      ...handoffs.map(render),
+    ].join(";\n");
+    const existing = (await this.load("codomain")).items.find((item) =>
+      inContext(item, projectId, runId) && normalizeIdentity(item.interfaceId ?? "") === normalizeIdentity(interfaceId));
+    return this.upsert({
+      ...(existing ?? {}), id: existing?.id ?? id, kind: "codomain", scope: "shared",
+      projectId, runId, interfaceId,
+      artifactIds: artifactIds.length ? artifactIds : handoffs.map((handoff) => `${handoff.directory}/PATCH_READY.md`),
+      producerIds: participants, consumerIds: ["coordinator", "integrator"],
+      title: `Integration contract from ${participants.join(" + ")} handoffs`,
+      targetRoles: [...participants, "coordinator", "integrator"], participants,
+      priority: 110, version: existing?.version ?? 1, text,
+      status: existing?.status === "verified" ? "verified" : "agreed",
+      verificationCommands,
+      evidence: handoffs.map((handoff) => `${handoff.assignment}: ${handoff.directory}/PATCH_READY.md`),
+      tags: [projectId, "dynamic-handoff", "composition", ...artifactIds.map((artifact) => basename(artifact))],
+    });
+  }
+
+  async recordCoDomainVerification(workspace: string, input: {
+    command: string; exitCode: number; source?: string; output?: string; error?: string;
+    projectId?: string; runId?: string;
+  }): Promise<number> {
+    if (!input.projectId || !input.runId || !input.command.trim()) return 0;
+    const command = canonicalVerificationCommand(input.command, workspace);
+    const codomain = await this.load("codomain");
+    let updated = 0;
+    for (const item of codomain.items.filter((candidate) => inContext(candidate, input.projectId, input.runId))) {
+      const required = item.verificationCommands ?? [];
+      if (!required.length || item.status === "verified") continue;
+      const matches = required.filter((expected) => {
+        const key = canonicalVerificationCommand(expected, workspace);
+        return key && (command.includes(key) || key.includes(command)
+          || (key.includes("pytest") && command.includes("pytest")
+            && key.match(/pytest\s+([^\s]+)/)?.[1] === command.match(/pytest\s+([^\s]+)/)?.[1]));
+      });
+      if (!matches.length) continue;
+      const attempt: VerificationAttempt = {
+        command: input.command, exitCode: input.exitCode, passed: input.exitCode === 0,
+        artifactVersions: {}, observedAt: new Date().toISOString(), source: input.source ?? "after-tool-call",
+        output: input.output?.slice(0, 2000), error: input.error?.slice(0, 2000),
+      };
+      const attempts = [...(item.verificationAttempts ?? []), attempt].slice(-30);
+      const passedKeys = new Set(attempts.filter((entry) => entry.passed).map((entry) =>
+        canonicalVerificationCommand(entry.command, workspace)));
+      const allPassed = required.every((expected) => {
+        const key = canonicalVerificationCommand(expected, workspace);
+        return [...passedKeys].some((actual) => actual.includes(key) || key.includes(actual)
+          || (key.includes("pytest") && actual.includes("pytest")
+            && key.match(/pytest\s+([^\s]+)/)?.[1] === actual.match(/pytest\s+([^\s]+)/)?.[1]));
+      });
+      await this.upsert({ ...item, verificationAttempts: attempts,
+        status: allPassed ? "verified" : "agreed",
+        evidence: [...(item.evidence ?? []),
+          `integration verification command=${input.command}; exit=${input.exitCode}; matched=${matches.join(",")}`].slice(-30),
+      });
+      updated += 1;
+    }
+    return updated;
+  }
+
+  async integrationContext(projectId: string, runId: string): Promise<string> {
+    const codomain = await this.load("codomain");
+    const items = codomain.items.filter((item) => inContext(item, projectId, runId)
+      && isCurrent(item) && isProductCodomain(item))
+      .sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+    if (!items.length) return "";
+    return ["[Multi-Agent Memory — integration acceptance contracts]",
+      ...items.map((item) => `- [${item.id}] state=${item.status}; version=${item.version ?? 1}\n${item.text}`),
+      "Treat every producer handoff above as a simultaneous acceptance criterion. Integrate, run each producer's boundary tests against the same final tree, then call multiagent_contract_transition(action=verify, baseVersion=current version) with exact passing evidence. Do not finalize while a contract is merely agreed.",
+    ].join("\n\n");
   }
 
   async observeWorkflow(workspace: string, nextRole?: string, projectId?: string,
@@ -533,7 +664,8 @@ export class MemoryEngine {
       const artifactVersions = Object.fromEntries(observations
         .filter((entry) => entry.exists && entry.sha256)
         .map((entry) => [entry.artifactId, entry.sha256 as string]));
-      const passed = input.exitCode === 0
+      const innerExit = input.output?.match(/\bEXIT\s*=\s*(\d+)\b/i)?.[1];
+      const passed = input.exitCode === 0 && (innerExit === undefined || Number(innerExit) === 0)
         && observations.every((entry) => entry.exists && Boolean(entry.sha256));
       const attempt: VerificationAttempt = {
         command,
@@ -566,6 +698,18 @@ export class MemoryEngine {
     return dependency.items.filter((item) => inContext(item, projectId, runId))
       .filter((item) => !projectId || !runId || Boolean(item.projectId && item.runId))
       .filter((item) => normalizedSet(item.consumerIds).includes(consumer))
+      .filter((item) => item.verificationCommand
+        ? item.lifecycleState !== "verified" && item.lifecycleState !== "ready"
+        : !["produced", "verified", "ready"].includes(item.lifecycleState ?? ""));
+  }
+
+  async producerBlockers(producerId?: string, projectId?: string, runId?: string): Promise<MemoryItem[]> {
+    if (!producerId) return [];
+    const producer = normalizeIdentity(producerId);
+    const dependency = await this.load("dependency");
+    return dependency.items.filter((item) => inContext(item, projectId, runId))
+      .filter((item) => !projectId || !runId || Boolean(item.projectId && item.runId))
+      .filter((item) => normalizedSet(item.producerIds).includes(producer))
       .filter((item) => item.verificationCommand
         ? item.lifecycleState !== "verified" && item.lifecycleState !== "ready"
         : !["produced", "verified", "ready"].includes(item.lifecycleState ?? ""));
@@ -622,10 +766,13 @@ export class MemoryEngine {
     if (!assignment) return [];
     const escaped = escapePattern(assignment);
     const focused = input.task.match(new RegExp(
-      `(?:taskName/label|taskName|label|assignment)\\s*[:=]?\\s*['"]?${escaped}['"]?[\\s\\S]{0,1800}`,
+      `(?:taskName/label|taskName|label|assignment|you\\s+are)\\s*[:=]?\\s*['"]?${escaped}['"]?[\\s\\S]{0,1800}`,
       "i"))?.[0] ?? input.task;
     const rawWorkDir = focused.match(/work only in\s+`([^`]+)`/i)?.[1]
-      ?? focused.match(/working directory\s*[:=]\s*`?([^`\n]+)`?/i)?.[1];
+      ?? focused.match(/working\s+only\s+in(?:\s+the)?(?:\s+workspace)?\s+directory\s*[:=]\s*`?([^`\n]+)`?/i)?.[1]
+      ?? focused.match(/working directory\s*[:=]\s*`?([^`\n]+)`?/i)?.[1]
+      ?? focused.match(/(?:your\s+)?workspace\s+is\s+`?([^`\s]+)`?/i)?.[1]
+      ?? focused.match(/(?:^|\n)Workspace\s*:\s*`?([^`\n]+)`?/i)?.[1];
     let workDirectory = rawWorkDir?.trim().replace(/[\\/]+$/, "");
     if (workDirectory && isAbsolute(workDirectory) && input.workspace) {
       const rel = relative(resolve(input.workspace), resolve(workDirectory));

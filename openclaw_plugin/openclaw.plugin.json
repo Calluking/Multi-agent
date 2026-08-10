@@ -1,7 +1,7 @@
 {
-  "id": "multiagent-memory",
-  "name": "Multi-Agent Memory",
-  "description": "Injects private dependency, shared co-domain contract, and testing-practice memory into spawned subagents.",
+  "id": "multi-agent-contract-protocol",
+  "name": "Multi-Agent Contract Protocol",
+  "description": "A memory-backed contract protocol for reliable multi-agent collaboration.",
   "version": "0.1.0",
   "activation": { "onStartup": true },
   "contracts": {

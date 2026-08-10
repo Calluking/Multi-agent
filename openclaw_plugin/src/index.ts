@@ -24,6 +24,58 @@ function commandFrom(params: Record<string, unknown>): string | undefined {
   return undefined;
 }
 
+function workspaceCandidate(value: unknown): string {
+  if (typeof value !== "string") return "";
+  let candidate = value.trim().replace(/[.;:]+$/, "");
+  if (!candidate) return "";
+  // Spawn objectives often say "workspace root (/path/plan.md)" while naming
+  // the deliverable rather than the directory. Treat a trailing file as an
+  // artifact hint, otherwise the observer checks /path/plan.md/plan.md.
+  if (/\/(?:TASK\.md|plan\.md|solution\.py|implementation\.md|review\.md|PATCH_READY\.md)$/i.test(candidate)) {
+    candidate = dirname(candidate);
+  }
+  return candidate;
+}
+
+export function workspaceFromSpawn(task: string, explicit?: unknown, remembered?: string): string {
+  const direct = workspaceCandidate(explicit);
+  if (direct) return direct;
+  if (remembered) return workspaceCandidate(remembered);
+  const stated = task.match(/(?:working|work)\s+(?:only\s+)?in\s+`?(\/[^`\s),]+)/i)?.[1]
+    ?? task.match(/workspace(?:\s+root)?[^/\n]*(\/[^)\n]+)/i)?.[1];
+  if (stated) return workspaceCandidate(stated);
+  const artifact = task.match(/(\/[^`\s,]+\/(?:TASK\.md|plan\.md|solution\.py|implementation\.md|review\.md|PATCH_READY\.md))/i)?.[1];
+  return artifact ? dirname(artifact) : "";
+}
+
+export function appendCoordinatorContinuation(message: any, waitInstruction = "Call sessions_yield now."): any {
+  const instruction = [
+    "[Multi-Agent Memory control plane]",
+    "The accepted spawn is not workflow completion. Do not end this coordinator turn with an acknowledgment or a statement that you will wait.",
+    `Your next action must be a tool call, with no intervening prose: ${waitInstruction}`,
+    "When the producer finishes, inspect its required artifacts, then spawn the next ready consumer.",
+    "Only return a final answer after every dependency and verification artifact required by the root task has been observed.",
+  ].join(" ");
+  if (!message || typeof message !== "object") return message;
+  const content = Array.isArray(message.content) ? [...message.content] : [];
+  content.push({ type: "text", text: instruction });
+  return { ...message, content };
+}
+
+export function appendProducerContinuation(message: any, assignment: string, obligationIds: string[]): any {
+  if (!message || typeof message !== "object") return message;
+  const instruction = [
+    "[Multi-Agent Memory producer gate]",
+    `You are ${assignment}; a prose acknowledgment is not a deliverable.`,
+    `Before your final response, satisfy and inspect every assigned obligation: ${obligationIds.join(", ") || "assigned artifacts"}.`,
+    "If verification is required, run it only after all final artifact writes; a command run before the last write is stale evidence.",
+    "Your next action must continue with the necessary file or verification tool unless every obligation is already satisfied.",
+  ].join(" ");
+  const content = Array.isArray(message.content) ? [...message.content] : [];
+  content.push({ type: "text", text: instruction });
+  return { ...message, content };
+}
+
 const RecordParameters = Type.Object({
   id: Type.String({ description: "Stable memory item id." }),
   kind: Type.Union([Type.Literal("dependency"), Type.Literal("codomain"), Type.Literal("testing")]),
@@ -71,9 +123,9 @@ const ContractTransitionParameters = Type.Object({
 });
 
 export default definePluginEntry({
-  id: "multiagent-memory",
-  name: "Multi-Agent Memory",
-  description: "Inject three complementary memory types into OpenClaw subagent creation.",
+  id: "multi-agent-contract-protocol",
+  name: "Multi-Agent Contract Protocol",
+  description: "Inject memory-backed contracts into multi-agent task execution.",
   register(api) {
     const config = (api.pluginConfig ?? {}) as PluginConfig;
     const engine = new MemoryEngine(config);
@@ -89,10 +141,15 @@ export default definePluginEntry({
     const childLedger = new Map<string, PendingInjection>();
     const initializedRootSessions = new Set<string>();
     const rootSessionKeys = new Set<string>();
+    const coordinatedRootSessions = new Set<string>();
     const workspaceBySession = new Map<string, string>();
     const projectBySession = new Map<string, string>();
     const projectByRun = new Map<string, string>();
     const runBySession = new Map<string, string>();
+    const waitInstructionBySession = new Map<string, string>();
+    const commandByToolCall = new Map<string, {
+      command: string; workspace: string; projectId?: string; runId?: string;
+    }>();
 
     if (engine.config.autoInitialize) {
       api.on("before_prompt_build", async (event: any, ctx: any) => {
@@ -102,13 +159,19 @@ export default definePluginEntry({
         const isChildSession = Boolean(ctx?.requesterSessionKey ?? event?.requesterSessionKey)
           || sessionKey.includes(":subagent:");
         if (isChildSession) return event;
-        if (sessionKey && initializedRootSessions.has(sessionKey)) return event;
-        if (sessionKey) {
+        const alreadyInitialized = Boolean(sessionKey && initializedRootSessions.has(sessionKey));
+        if (sessionKey && !alreadyInitialized) {
           initializedRootSessions.add(sessionKey);
           rootSessionKeys.add(sessionKey);
+          waitInstructionBySession.set(sessionKey,
+            /bounded\s+exec\s+wait|exec\s+wait/i.test(prompt)
+              ? "Call one bounded exec wait for the producer's expected artifact now; inspect it when the command returns."
+              : "Call sessions_yield now and continue only after the producer completion event arrives.");
         }
-        const workspace = String(ctx?.workspaceDir ?? event?.workspaceDir ?? "");
-        if (workspace) {
+        const workspace = String(ctx?.workspaceDir ?? event?.workspaceDir
+          ?? (sessionKey ? workspaceBySession.get(sessionKey) : "") ?? "");
+        if (workspace && !alreadyInitialized) {
+          if (sessionKey) workspaceBySession.set(sessionKey, workspace);
           try {
             const taskText = await readFile(resolve(workspace, "TASK.md"), "utf8");
             const runId = sessionKey || undefined;
@@ -129,35 +192,48 @@ export default definePluginEntry({
           "If a spawn is blocked, follow the gate reason: resume the named recovery owner, make a materially changed repair, rerun the stated verification, then retry the blocked spawn.",
           "Use multiagent_contract_transition only when a child packet explicitly identifies a shared product/API contract requiring proposal, revision, acceptance, or real boundary verification. Never use contract transitions for workflow artifacts such as plan.md, solution.py, implementation.md, review.md, or PATCH_READY.md.",
         ].join("\n");
+        let integrationContext = "";
+        const projectId = sessionKey ? projectBySession.get(sessionKey) : undefined;
+        const runId = sessionKey ? runBySession.get(sessionKey) : undefined;
+        if (workspace && projectId && runId) {
+          try {
+            await engine.discoverCoDomainFromHandoffs(workspace, projectId, runId);
+            integrationContext = await engine.integrationContext(projectId, runId);
+          } catch {
+            // Dynamic boundary discovery is also fail-open.
+          }
+        }
+        const injected = integrationContext ? `${context}\n\n${integrationContext}` : context;
         return {
           ...event,
-          injectedContext: event?.injectedContext ? `${event.injectedContext}\n\n${context}` : context,
-          prependContext: event?.prependContext ? `${event.prependContext}\n\n${context}` : context,
+          injectedContext: event?.injectedContext ? `${event.injectedContext}\n\n${injected}` : injected,
+          prependContext: event?.prependContext ? `${event.prependContext}\n\n${injected}` : injected,
         };
       });
 
     }
 
     api.on("before_tool_call", async (event, ctx) => {
-      let observedWorkspace = String((ctx as any)?.workspaceDir ?? event.params.workdir
-        ?? event.params.cwd ?? "");
+      const explicitWorkspace = event.params.workdir ?? event.params.cwd;
+      let observedWorkspace = workspaceFromSpawn(
+        event.toolName === "sessions_spawn" && typeof event.params.task === "string" ? event.params.task : "",
+        explicitWorkspace,
+        ctx.sessionKey ? workspaceBySession.get(ctx.sessionKey) : undefined,
+      );
       if (ctx.sessionKey && observedWorkspace) workspaceBySession.set(ctx.sessionKey, observedWorkspace);
+      const observedCommand = commandFrom(event.params);
+      const toolCallId = event.toolCallId ?? ctx.toolCallId;
+      if (observedCommand && observedWorkspace && toolCallId) {
+        commandByToolCall.set(toolCallId, {
+          command: observedCommand,
+          workspace: observedWorkspace,
+          projectId: ctx.sessionKey ? projectBySession.get(ctx.sessionKey) : undefined,
+          runId: ctx.sessionKey ? runBySession.get(ctx.sessionKey) : undefined,
+        });
+      }
       if (event.toolName !== "sessions_spawn") return;
       const task = typeof event.params.task === "string" ? event.params.task : "";
       if (!task.trim()) return;
-      if (!observedWorkspace) {
-        // Coordinators commonly state the assigned workspace explicitly in a
-        // native spawn objective even when the hook context omits workspaceDir.
-        // Recover that path so artifact readiness remains observer-owned.
-        observedWorkspace = task.match(/(?:working|work)\s+(?:only\s+)?in\s+`?(\/[^`\s),]+)/i)?.[1]?.trim()
-          ?? task.match(/workspace(?:\s+root)?[^/\n]*(\/[^)\n]+)/i)?.[1]?.trim()
-          ?? "";
-        observedWorkspace = observedWorkspace.replace(/[.;:]+$/, "");
-        if (!observedWorkspace) {
-          const artifactPath = task.match(/(\/[^`\s,]+\/(?:TASK\.md|plan\.md|solution\.py|implementation\.md|review\.md))/i)?.[1];
-          if (artifactPath) observedWorkspace = dirname(artifactPath);
-        }
-      }
       if (ctx.sessionKey && observedWorkspace) {
         workspaceBySession.set(ctx.sessionKey, observedWorkspace);
       }
@@ -166,6 +242,7 @@ export default definePluginEntry({
       // normally carries the task/product context prepared by the coordinator.
       const parent = ctx.sessionKey ?? (event as any).sessionKey ?? (event as any).requesterSessionKey
         ?? `workspace:${observedWorkspace || "unknown"}`;
+      coordinatedRootSessions.add(parent);
       const runId = runBySession.get(parent) ?? parent;
       // Keep every spawn in a root session on one stable project identity.
       // Child objectives vary by role, so hashing each spawn's task text
@@ -193,7 +270,8 @@ export default definePluginEntry({
         : task.toLowerCase().includes("implementer") ? "implementer"
           : task.toLowerCase().includes("planner") ? "planner" : undefined;
       const assignment = typeof (event.params as any).taskName === "string" ? String((event.params as any).taskName)
-        : typeof (event.params as any).label === "string" ? String((event.params as any).label) : undefined;
+        : typeof (event.params as any).label === "string" ? String((event.params as any).label)
+          : task.match(/\byou\s+are\s+([a-z][a-z0-9_-]*)\b/i)?.[1];
       const consumerId = assignment ?? role;
       if (assignment) {
         await engine.registerAssignment({ projectId, runId, assignmentId: assignment, task, workspace });
@@ -236,48 +314,112 @@ export default definePluginEntry({
     }, { priority: 80, timeoutMs: 10_000 });
 
     api.on("after_tool_call", async (event, ctx) => {
-      const command = commandFrom(event.params);
+      const toolCallId = event.toolCallId ?? ctx.toolCallId;
+      const pending = toolCallId ? commandByToolCall.get(toolCallId) : undefined;
+      if (toolCallId) commandByToolCall.delete(toolCallId);
+      const command = pending?.command ?? commandFrom(event.params);
       if (!command) return;
-      const workspace = String((ctx as any)?.workspaceDir ?? event.params.workdir
+      const workspace = pending?.workspace ?? String((ctx as any)?.workspaceDir ?? event.params.workdir
         ?? event.params.cwd ?? (ctx.sessionKey ? workspaceBySession.get(ctx.sessionKey) : "") ?? "");
       if (!workspace) return;
-      const exitCode = event.error ? 1 : numericExitCode(event.result);
+      const output = event.result === undefined ? "" : JSON.stringify(event.result);
+      const markedExit = output.match(/\bEXIT\\?"?\s*=\s*(\d+)\b/i)?.[1];
+      const exitCode = event.error ? 1 : numericExitCode(event.result)
+        ?? (markedExit === undefined ? undefined : Number(markedExit));
       if (exitCode === undefined) return;
       await engine.recordVerification(workspace, {
         command,
         exitCode,
         source: `after-tool-call:${event.toolName}`,
-        output: event.result === undefined ? undefined : JSON.stringify(event.result),
+        output,
         error: event.error,
-        projectId: ctx.sessionKey ? projectBySession.get(ctx.sessionKey) : undefined,
-        runId: ctx.sessionKey ? runBySession.get(ctx.sessionKey) : undefined,
+        projectId: pending?.projectId ?? (ctx.sessionKey ? projectBySession.get(ctx.sessionKey) : undefined),
+        runId: pending?.runId ?? (ctx.sessionKey ? runBySession.get(ctx.sessionKey) : undefined),
       });
+      await engine.recordCoDomainVerification(workspace, {
+        command,
+        exitCode,
+        source: `after-tool-call:${event.toolName}`,
+        output,
+        error: event.error,
+        projectId: pending?.projectId ?? (ctx.sessionKey ? projectBySession.get(ctx.sessionKey) : undefined),
+        runId: pending?.runId ?? (ctx.sessionKey ? runBySession.get(ctx.sessionKey) : undefined),
+      });
+    }, { priority: 80, timeoutMs: 10_000 });
+
+    // A finalize revision is deliberately ignored by OpenClaw after tools with
+    // deterministic side effects (including sessions_spawn). Put the durable
+    // continuation obligation in the spawn result before the model chooses to
+    // acknowledge and stop.
+    api.on("tool_result_persist", (event, ctx) => {
+      const toolName = ctx.toolName ?? event.toolName;
+      if (toolName === "sessions_spawn") {
+        const waitInstruction = ctx.sessionKey ? waitInstructionBySession.get(ctx.sessionKey) : undefined;
+        return { message: appendCoordinatorContinuation(event.message, waitInstruction) };
+      }
+      const child = ctx.sessionKey ? childLedger.get(ctx.sessionKey) : undefined;
+      if (!child || !child.assignment) return;
+      return {
+        message: appendProducerContinuation(
+          event.message,
+          child.assignment,
+          child.selected.dependency ?? [],
+        ),
+      };
     }, { priority: 80, timeoutMs: 10_000 });
 
     api.on("before_agent_finalize", async (event) => {
       const sessionKey = event.sessionKey ?? "";
-      if (!sessionKey || sessionKey.includes(":subagent:")
-        || !rootSessionKeys.has(sessionKey) || event.stopHookActive) return;
-      const terminalIntent = /\b(done|complete|completed|finished|final|successfully|all tests pass(?:ed)?)\b/i
-        .test(event.lastAssistantMessage ?? "");
-      if (!terminalIntent) return;
+      if (!sessionKey || event.stopHookActive) return;
+      const child = childLedger.get(sessionKey);
+      if (child) {
+        if (child.workspace) {
+          await engine.observeWorkflow(child.workspace, child.assignment, child.projectId, child.runId);
+        }
+        const blockers = await engine.producerBlockers(child.assignment, child.projectId, child.runId);
+        if (!blockers.length) return;
+        const summary = blockers.map((item) =>
+          `${item.id}[${item.lifecycleState ?? item.status ?? "unresolved"}]`).join(", ");
+        return {
+          action: "revise" as const,
+          reason: `Producer finalization blocked by unresolved dependency obligations: ${summary}`,
+          retry: {
+            idempotencyKey: `multiagent-producer-finalize:${child.projectId}:${child.runId}:${child.assignment}`,
+            maxAttempts: 1,
+            instruction: `Do not finish or merely acknowledge. Resolve these producer obligations now: ${summary}. `
+              + "Create the missing artifacts with file tools, run the exact required verification command when configured, inspect the outputs, and only then report completion.",
+          },
+        };
+      }
+      if (sessionKey.includes(":subagent:") || !rootSessionKeys.has(sessionKey)) return;
+      // Once a root has spawned a child, every apparent finalization is a
+      // workflow boundary. Models frequently end after saying "I'll wait" or
+      // acknowledging a child spawn; limiting this gate to completion words
+      // lets those turns escape with required artifacts still unresolved.
+      if (!coordinatedRootSessions.has(sessionKey)) return;
       const projectId = projectBySession.get(sessionKey);
       const runId = runBySession.get(sessionKey);
       const workspace = event.cwd ?? workspaceBySession.get(sessionKey);
       if (!projectId || !runId) return;
-      if (workspace) await engine.observeWorkflow(workspace, undefined, projectId, runId);
+      if (workspace) {
+        await engine.observeWorkflow(workspace, undefined, projectId, runId);
+        await engine.discoverCoDomainFromHandoffs(workspace, projectId, runId);
+      }
       const blockers = await engine.completionBlockers(projectId, runId);
       if (!blockers.length) return;
       const summary = blockers.map((item) =>
         `${item.id}[${item.lifecycleState ?? item.status ?? "unresolved"}]`).join(", ");
+      const integrationContext = await engine.integrationContext(projectId, runId);
       return {
         action: "revise" as const,
         reason: `Multi-agent completion gate found unresolved obligations: ${summary}`,
         retry: {
           idempotencyKey: `multiagent-completion:${projectId}:${runId}`,
-          maxAttempts: 1,
+          maxAttempts: 3,
           instruction: `Do not report completion. Resolve these exact obligations first: ${summary}. `
-            + "Resume or spawn the recorded recovery owner, use a materially changed strategy after failure, rerun the configured verification command, and verify every shared contract with real boundary evidence.",
+            + "If a producer is already running, wait for or resume that producer instead of spawning a duplicate. "
+            + "Resume or spawn the recorded recovery owner, use a materially changed strategy after failure, rerun the configured verification command, and verify every shared contract with real boundary evidence.\n\n"
+            + integrationContext,
         },
       };
     }, { priority: 80, timeoutMs: 10_000 });
@@ -286,7 +428,15 @@ export default definePluginEntry({
       // OpenClaw exposes the parent/requester identity on the subagent hook
       // context, not as parentSessionKey on the event.
       const parent = ctx.requesterSessionKey ?? event.requesterSessionKey ?? "unknown-parent";
-      const pending = pendingByParent.get(parent)?.shift();
+      const queue = pendingByParent.get(parent) ?? [];
+      const label = typeof event.label === "string" ? event.label : "";
+      const match = label
+        ? queue.findIndex((item) => item.assignment
+          && item.assignment.trim().toLowerCase() === label.trim().toLowerCase())
+        : -1;
+      const pending = match >= 0 ? queue.splice(match, 1)[0] : queue.shift();
+      if (queue.length) pendingByParent.set(parent, queue);
+      else pendingByParent.delete(parent);
       if (pending && event.childSessionKey) {
         childLedger.set(event.childSessionKey, pending);
         if (pending.workspace) workspaceBySession.set(event.childSessionKey, pending.workspace);
@@ -305,6 +455,10 @@ export default definePluginEntry({
         outcome: event.outcome ?? event.reason ?? "unknown",
         error: event.error,
       });
+      if (record.workspace && record.projectId && record.runId) {
+        await engine.observeWorkflow(record.workspace, record.assignment, record.projectId, record.runId);
+        await engine.discoverCoDomainFromHandoffs(record.workspace, record.projectId, record.runId);
+      }
       await engine.upsert({
         id: `episode:${record.injectionId}`,
         kind: "testing",

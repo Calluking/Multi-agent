@@ -18,12 +18,22 @@ try {
     status: "unresolved", lifecycleState: "blocked", evidence: [], targetRoles: ["implementer"],
   });
 
+  if ((await engine.producerBlockers("planner", "task", undefined)).map((item) => item.id).join() !== "task:plan") {
+    throw new Error("planner was allowed to finalize before producing its artifact");
+  }
+  if ((await engine.producerBlockers("implementer", "task", undefined)).map((item) => item.id).join() !== "task:solution") {
+    throw new Error("implementer was allowed to finalize before producing and verifying its artifact");
+  }
+
   if ((await engine.readinessBlockers("planner")).length !== 0) throw new Error("producer was blocked by its own output");
   if ((await engine.readinessBlockers("implementer")).map((item) => item.id).join() !== "task:plan") {
     throw new Error("implementer prerequisite gate failed");
   }
   const plan = (await engine.load("dependency")).items.find((item) => item.id === "task:plan");
   await engine.upsert({ ...plan, lifecycleState: "produced", status: "produced" });
+  if ((await engine.producerBlockers("planner", "task", undefined)).length !== 0) {
+    throw new Error("planner remained blocked after producing its artifact");
+  }
   if ((await engine.readinessBlockers("implementer")).length !== 0) {
     throw new Error("non-command artifact did not become consumable when produced");
   }

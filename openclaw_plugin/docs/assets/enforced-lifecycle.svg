@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="600" viewBox="0 0 1600 600" role="img" aria-labelledby="title desc">
+  <title id="title">Enforced multi-agent lifecycle</title>
+  <desc id="desc">The plugin injects memory, observes work, checks producer completion, and releases the next agent only when evidence is ready.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#F8FAFF"/><stop offset="1" stop-color="#EEF3FC"/></linearGradient>
+    <filter id="shadow"><feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#52658D" flood-opacity=".16"/></filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#7B88A7"/></marker>
+    <style>.t{font-family:Inter,Segoe UI,Arial,sans-serif;fill:#18213A}.m{fill:#62708D}.title{font-size:38px;font-weight:750}.head{font-size:24px;font-weight:700}.body{font-size:18px}.card{fill:#fff;stroke:#D5DDF0;stroke-width:2}.line{stroke:#7B88A7;stroke-width:3;fill:none;marker-end:url(#arrow)}</style>
+  </defs>
+  <rect width="1600" height="600" rx="34" fill="url(#bg)"/>
+  <text x="70" y="80" class="t title">One guarded loop</text>
+  <text x="70" y="116" class="t body m">The producer cannot disappear before its obligation is real.</text>
+
+  <g filter="url(#shadow)">
+    <rect x="70" y="215" width="245" height="150" rx="23" class="card"/><circle cx="112" cy="258" r="20" fill="#6964F2"/><text x="106" y="265" fill="#fff" font-family="Arial" font-size="18" font-weight="700">1</text><text x="145" y="266" class="t head">Inject</text><text x="102" y="316" class="t body m">Give the child only</text><text x="102" y="342" class="t body m">relevant memory.</text>
+    <rect x="375" y="215" width="245" height="150" rx="23" class="card"/><circle cx="417" cy="258" r="20" fill="#5E83E4"/><text x="411" y="265" fill="#fff" font-family="Arial" font-size="18" font-weight="700">2</text><text x="450" y="266" class="t head">Work</text><text x="407" y="316" class="t body m">Create artifacts and</text><text x="407" y="342" class="t body m">run verification.</text>
+    <rect x="680" y="215" width="245" height="150" rx="23" class="card"/><circle cx="722" cy="258" r="20" fill="#3DA2C7"/><text x="716" y="265" fill="#fff" font-family="Arial" font-size="18" font-weight="700">3</text><text x="755" y="266" class="t head">Check</text><text x="712" y="316" class="t body m">Observe files and</text><text x="712" y="342" class="t body m">current evidence.</text>
+    <rect x="985" y="215" width="245" height="150" rx="23" class="card"/><circle cx="1027" cy="258" r="20" fill="#22B7AE"/><text x="1021" y="265" fill="#fff" font-family="Arial" font-size="18" font-weight="700">4</text><text x="1060" y="266" class="t head">Release</text><text x="1017" y="316" class="t body m">Start the consumer</text><text x="1017" y="342" class="t body m">when ready.</text>
+    <rect x="1290" y="215" width="245" height="150" rx="23" class="card"/><circle cx="1332" cy="258" r="20" fill="#17B996"/><text x="1326" y="265" fill="#fff" font-family="Arial" font-size="18" font-weight="700">5</text><text x="1365" y="266" class="t head">Complete</text><text x="1322" y="316" class="t body m">Finish only when all</text><text x="1322" y="342" class="t body m">obligations are done.</text>
+  </g>
+  <path d="M315 290h60M620 290h60M925 290h60M1230 290h60" class="line"/>
+
+  <path d="M803 365v78c0 28-22 42-50 42H520c-28 0-42-14-42-42v-78" fill="none" stroke="#E18A4E" stroke-width="3.5" stroke-dasharray="8 7" marker-end="url(#arrow)"/>
+  <rect x="555" y="452" width="176" height="45" rx="22" fill="#FFF0E5" stroke="#E9A06C"/><text x="596" y="481" class="t body" fill="#A65520" font-weight="700">REVISE</text>
+  <text x="790" y="492" class="t body m">missing artifact or stale evidence → return to the same producer</text>
+  <text x="70" y="553" class="t body m">Producer checkpoint  ·  Consumer gate  ·  Root completion gate</text>
+</svg>

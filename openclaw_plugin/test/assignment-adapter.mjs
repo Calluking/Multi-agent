@@ -35,6 +35,25 @@ write \`peer_token/PATCH_READY.md\``;
   if (other.artifactIds.some((artifact) => artifact.startsWith("peer_token/"))) {
     throw new Error(`assignment path leaked to peer owner: ${JSON.stringify(other)}`);
   }
+  const absoluteTask = `You are token-owner working ONLY in the workspace directory: ${root}/peer_token\n`
+    + "Create PATCH_READY.md when complete.";
+  const absolute = await engine.registerAssignment({ projectId: "encode-project", runId: "run-1",
+    assignmentId: "token-owner", task: absoluteTask, workspace: root });
+  if (absolute[0].workDirectory !== "peer_token") {
+    throw new Error(`OpenClaw absolute workspace phrase not normalized: ${absolute[0].workDirectory}`);
+  }
+  const objectiveOnly = await engine.registerAssignment({ projectId: "encode-project", runId: "run-1",
+    assignmentId: "token-owner", workspace: root,
+    task: `You are token-owner working ONLY in the workspace directory: ${root}/peer_token\nCreate PATCH_READY.md.` });
+  if (objectiveOnly[0].workDirectory !== "peer_token") {
+    throw new Error(`objective-only assignment did not retain its work directory: ${objectiveOnly[0].workDirectory}`);
+  }
+  const contextSniper = await engine.registerAssignment({ projectId: "encode-project", runId: "run-1",
+    assignmentId: "token-owner", workspace: root,
+    task: "You are token-owner. Your workspace is `./peer_token/` which is a repository copy." });
+  if (contextSniper[0].workDirectory !== "./peer_token") {
+    throw new Error(`relative workspace form was not retained: ${contextSniper[0].workDirectory}`);
+  }
   console.log("PASS universal assignment workdir and artifact ownership adapter");
 } finally {
   await rm(root, { recursive: true, force: true });

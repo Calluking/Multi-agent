@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="760" viewBox="0 0 1600 760" role="img" aria-labelledby="title desc">
+  <title id="title">Multi-Agent Memory architecture</title>
+  <desc id="desc">A coordinator and child agents communicate through a memory control plane backed by dependency, contract, and testing memory.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#FFFFFF"/><stop offset="1" stop-color="#F7F9FD"/></linearGradient>
+    <linearGradient id="core" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#6C66E9"/><stop offset="1" stop-color="#28B8AC"/></linearGradient>
+    <filter id="shadow"><feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#53648A" flood-opacity=".14"/></filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#6F82AD"/></marker>
+    <style>.t{font-family:Inter,Segoe UI,Arial,sans-serif;fill:#19213A}.m{fill:#66728D}.title{font-size:40px;font-weight:750}.head{font-size:27px;font-weight:700}.body{font-size:19px}.node{fill:#FFFFFF;stroke:#D5DDF0;stroke-width:2}.line{fill:none;stroke:#8290AE;stroke-width:3;marker-end:url(#arrow)}</style>
+  </defs>
+  <rect width="1600" height="760" rx="34" fill="url(#bg)"/>
+  <text x="80" y="82" class="t title">A small control plane between every handoff</text>
+  <text x="80" y="118" class="t body m">Agents do the work. Memory decides when the next step is safe.</text>
+
+  <g filter="url(#shadow)">
+    <rect x="80" y="255" width="290" height="150" rx="24" class="node"/>
+    <circle cx="130" cy="306" r="22" fill="#6B66F4"/><path d="M120 306h20M130 296v20" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+    <text x="170" y="314" class="t head">Coordinator</text>
+    <text x="112" y="365" class="t body m">Creates assignments</text>
+
+    <rect x="525" y="210" width="550" height="240" rx="30" fill="#FFFFFF" stroke="#C9D2EA" stroke-width="2.5"/>
+    <rect x="555" y="240" width="490" height="74" rx="20" fill="url(#core)"/>
+    <text x="615" y="287" class="t head">Memory control plane</text>
+    <text x="600" y="360" class="t body">Retrieve context</text><circle cx="576" cy="353" r="7" fill="#746EEB"/>
+    <text x="807" y="360" class="t body">Observe evidence</text><circle cx="783" cy="353" r="7" fill="#3AAFC1"/>
+    <text x="1010" y="360" class="t body" text-anchor="end">Enforce gates</text>
+    <text x="800" y="410" class="t body m" text-anchor="middle">spawn · finalize · complete</text>
+
+    <rect x="1230" y="255" width="290" height="150" rx="24" class="node"/>
+    <circle cx="1280" cy="306" r="22" fill="#25BFB2"/><path d="M1269 306l8 8 15-18" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="1320" y="314" class="t head">Child agents</text>
+    <text x="1262" y="365" class="t body m">Produce files + proof</text>
+  </g>
+
+  <path d="M370 330h155" class="line"/><path d="M1075 330h155" class="line"/><path d="M1230 380C1135 500 465 500 370 380" class="line" opacity=".7"/>
+
+  <g filter="url(#shadow)">
+    <rect x="290" y="555" width="300" height="105" rx="22" fill="#F5F7FF" stroke="#BFCBF0"/>
+    <circle cx="330" cy="607" r="11" fill="#5D7DEA"/><text x="356" y="602" class="t head">Dependency</text><text x="356" y="630" class="t body m">who owes what</text>
+    <rect x="650" y="555" width="300" height="105" rx="22" fill="#FAF7FF" stroke="#D3C4EF"/>
+    <circle cx="690" cy="607" r="11" fill="#956AEF"/><text x="716" y="602" class="t head">Contract</text><text x="716" y="630" class="t body m">what compatible means</text>
+    <rect x="1010" y="555" width="300" height="105" rx="22" fill="#F2FBFA" stroke="#B7DDD8"/>
+    <circle cx="1050" cy="607" r="11" fill="#2CC2AF"/><text x="1076" y="602" class="t head">Testing</text><text x="1076" y="630" class="t body m">what proves it works</text>
+  </g>
+  <path d="M650 450L495 555M800 450v105M950 450l155 105" fill="none" stroke="#53678F" stroke-width="2.5"/>
+</svg>

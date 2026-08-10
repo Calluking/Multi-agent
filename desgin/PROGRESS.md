@@ -128,6 +128,8 @@ Universal control-plane completion evidence:
 - owned artifact paths and handoff artifacts are assignment-scoped;
 - peer paths cannot leak into another owner's dependency record;
 - downstream spawns are blocked until prerequisites are produced or verified;
+- producer finalization is revised before a child exits while its owned artifacts or exact-command verification remain unresolved;
+- the revision re-enters the same child once with a concrete, idempotent completion instruction, matching the ideal implementation-finalization checkpoint;
 - failed owners receive an evidence-bearing changed-strategy recovery packet;
 - retry admission is bounded and exhaustion requires escalation;
 - terminal completion is revised while completion artifacts or shared contracts remain unresolved;
@@ -135,3 +137,43 @@ Universal control-plane completion evidence:
 - native OpenClaw runtime loads all six hooks and both tools with zero plugin diagnostics;
 - conversation access is explicitly enabled for the completion-finalization hook;
 - the complete local suite contains eleven passing behavioral test scripts.
+
+## Final validation (2026-08-06)
+
+The plugin implementation and the requested one-task validations are complete.
+
+- MultiAgentBench task 1 completed the planner → implementer → reviewer workflow. The final workspace contains `plan.md`, `solution.py`, `implementation.md`, and `review.md`; an independent `python3 solution.py` run exits 0 and prints `ALL TESTS PASSED`.
+- CooperBench task 0 produced both independent `tiktoken/core.py` feature changes. The combined integration tree passes the repository suite plus both feature suites: **34 passed**.
+- Live validation exposed and fixed stable root/run identity, workspace discovery across native prompt forms, downstream-role preservation, observer-owned workflow readiness, command-wrapper normalization, and exclusion of unscoped legacy dependencies from run-local gates.
+- Post-validation analysis exposed one architectural omission: the plugin had consumer and root gates but not the ideal producer pre-finalization checkpoint. `before_agent_finalize` now observes the child workspace and revises an early producer completion before `subagent_ended`.
+- The final plugin unit suite passes all eleven behavioral scripts.
+
+The final evidence and caveats are recorded in `desgin/FINAL_VALIDATION.md`.
+
+## Concurrent-run repair (2026-08-07)
+
+The fresh five-task comparison exposed two live control-plane gaps that unit-only validation had missed:
+
+- workspace phrases such as `workspace root (/path/plan.md)` were interpreted as a directory, so the observer checked `/path/plan.md/plan.md` and permanently blocked the consumer;
+- OpenClaw intentionally ignores `before_agent_finalize` revision requests after a deterministic side effect such as `sessions_spawn`, allowing coordinators to end after “I will wait” even with unresolved obligations.
+
+The plugin now remembers the authoritative root workspace, normalizes artifact-shaped workspace hints to their parent directory, correlates concurrent child spawns by label instead of FIFO order, and injects a mandatory continuation action directly into persisted spawn results. Producer tool results likewise carry a post-write completion/verification obligation because a finalization-only gate cannot reliably revise turns containing writes or commands.
+
+Focused live validation produced all four ordered artifacts and independently executed `python3 solution.py` with exit 0 and exact stdout `memory-gate-ok`. The complete local suite now contains twelve passing behavioral scripts, including the workspace-path and continuation regressions.
+
+Full repaired-plugin evaluation completed on five MultiAgentBench tasks and five CooperBench pairs. MultiAgentBench reached 5/5 complete workflows and 87/100 versus the unchanged 46/100 control. CooperBench reached 5/5 dual handoffs and 5/5 integrations, but only 3/10 official feature suites and 1/5 paired tasks passed, yielding 20/100 versus the 0/100 control. The remaining milestone is co-domain composition quality, not dependency handoff completion.
+
+## Dynamic co-domain repair (2026-08-07)
+
+The missing co-domain path is now implemented and covered by the plugin suite:
+
+- peer `PATCH_READY.md` handoffs are treated as producer boundary evidence rather than private completion prose;
+- when two or more handoffs exist, the plugin creates one versioned integration contract even if assignments declare different artifacts;
+- the contract preserves each handoff's public signatures, defaults, validation, error behavior, changed paths, and test evidence as simultaneous integration acceptance criteria;
+- it is injected into resumed coordinator turns and blocks root completion until the coordinator records real shared-boundary verification;
+- universal assignment parsing now recognizes OpenClaw's absolute `working ONLY in the workspace directory: …` wording, and `Artifact:` declarations are retained as handoff ownership;
+- `npm test` passes all thirteen behavioral scripts, including dynamic handoff discovery, coordinator injection, completion gating, and the OpenClaw workspace-phrase regression.
+
+The first fresh live Cooper retry did not reach plugin execution because the configured benchmark provider timed out during the root's first LLM request. Earlier attempted retries that show empty handoffs are invalid: their gateway was restarted after the root yielded, interrupting live child sessions. Those runs must not be used as score evidence. A clean end-to-end Cooper score remains pending a successful provider run with the gateway held stable through child completion and integration.
+
+Focused runtime tracing subsequently found one native-hook adapter detail: some OpenClaw spawn events omit `taskName` and `label` even though the child objective begins `You are <assignment>`. The plugin now derives the assignment from that objective as a fallback, so peer workspace registration and dynamic handoff discovery are preserved on that hook variant. The adapter regression is covered by the assignment test; the suite remains fully passing.

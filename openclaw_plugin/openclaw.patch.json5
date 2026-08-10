@@ -1,7 +1,7 @@
 {
   plugins: {
     entries: {
-      "multiagent-memory": {
+      "multi-agent-contract-protocol": {
         enabled: true,
         config: {
           storeRoot: "/home/luzh/.openclaw/multiagent-memory",

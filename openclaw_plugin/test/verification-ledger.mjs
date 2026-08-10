@@ -28,7 +28,17 @@ try {
   }
 
   await engine.recordVerification(workspace, {
-    command: "python3 solution.py", exitCode: 0, output: "ok",
+    command: `cd ${workspace} && python3 solution.py; echo "EXIT=$?"`,
+    exitCode: 0, output: "failed\nEXIT=1",
+  });
+  item = (await engine.load("dependency")).items[0];
+  if (item.lifecycleState !== "blocked" || item.verificationAttempts.at(-1).passed) {
+    throw new Error("status-echo wrapper hid the inner verification failure");
+  }
+
+  await engine.recordVerification(workspace, {
+    command: `cd ${workspace} && python3 solution.py; echo "EXIT=$?"`,
+    exitCode: 0, output: "ok\nEXIT=0",
   });
   item = (await engine.load("dependency")).items[0];
   if (item.lifecycleState !== "verified" || !item.verificationAttempts.at(-1).passed) {
