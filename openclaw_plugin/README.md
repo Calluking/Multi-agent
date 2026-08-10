@@ -7,7 +7,7 @@
 [![MultiAgentBench](https://img.shields.io/badge/MultiAgentBench-task%20passed-2ea44f)](../desgin/FINAL_VALIDATION.md)
 [![CooperBench](https://img.shields.io/badge/CooperBench-34%20tests%20passed-2ea44f)](../desgin/FINAL_VALIDATION.md)
 
-![Multi-Agent Contract Protocol coordinating verified agent handoffs](./docs/assets/macp-hero.png)
+![Multi-Agent Contract Protocol coordinating verified agent handoffs](https://gitcode.com/lukchiwang/Multi-Agent_Contract_Protocol/-/raw/main/openclaw_plugin/docs/assets/macp-hero.png)
 
 Multi-Agent Memory turns memory from passive prompt context into an active coordination layer. It observes the real OpenClaw agent lifecycle, injects only the memory relevant to each assignment, blocks consumers whose prerequisites are not ready, sends prematurely finishing producers back to complete their artifacts, and refuses final completion until the workflow has objective evidence.
 
@@ -31,7 +31,7 @@ This plugin converts those conditions into lifecycle gates rather than suggestio
 
 ## System at a glance
 
-![Architecture overview showing OpenClaw agents, lifecycle hooks, enforcement, and the three typed memory banks](./docs/assets/architecture-overview.svg)
+![Architecture overview showing OpenClaw agents, lifecycle hooks, enforcement, and the three typed memory banks](https://gitcode.com/lukchiwang/Multi-Agent_Contract_Protocol/-/raw/main/openclaw_plugin/docs/assets/architecture-overview.svg)
 
 The three banks have deliberately different jobs:
 
@@ -43,9 +43,9 @@ The three banks have deliberately different jobs:
 
 ## The enforced lifecycle
 
-![Enforced lifecycle from assignment through producer checkpoint, consumer gate, and root completion](./docs/assets/enforced-lifecycle.svg)
+![Enforced lifecycle from assignment through producer checkpoint, consumer gate, and root completion](https://gitcode.com/lukchiwang/Multi-Agent_Contract_Protocol/-/raw/main/openclaw_plugin/docs/assets/enforced-lifecycle.svg)
 
-![Handoff sequence from spawn to verified completion](./docs/assets/handoff-sequence.svg)
+![Handoff sequence from spawn to verified completion](https://gitcode.com/lukchiwang/Multi-Agent_Contract_Protocol/-/raw/main/openclaw_plugin/docs/assets/handoff-sequence.svg)
 
 This producer-finalization checkpoint is important. Dependency memory does not merely tell a later reviewer that something is missing; it prevents the responsible child from ending after an acknowledgment when its owned artifact or verification obligation is still unresolved.
 
