@@ -7,7 +7,7 @@
 [![Tests](https://img.shields.io/badge/plugin%20tests-passing-1b9c78)](./openclaw_plugin/VALIDATION.md)
 [![GitCode](https://img.shields.io/badge/GitCode-repository-111827)](https://gitcode.com/lukchiwang/Multi-Agent_Contract_Protocol)
 
-![Multi-Agent Contract Protocol coordinating verified agent handoffs](https://gitcode.com/lukchiwang/Multi-Agent_Contract_Protocol/-/raw/main/openclaw_plugin/docs/assets/macp-hero.png)
+![Multi-Agent Contract Protocol coordinating verified agent handoffs](docs/assets/readme/MultiAgentContractProtocol/macp_hero.png)
 
 Multi-Agent Contract Protocol (MACP) turns agent memory into an active coordination layer. It tracks prerequisites, shared interface contracts, ownership, and executable evidence across agent handoffs. It is designed to work across CLIs; OpenClaw is the first adapter.
 
@@ -25,7 +25,7 @@ MACP makes those obligations explicit and enforceable.
 
 ## Architecture
 
-![MACP architecture: lifecycle hooks, contract control plane, and typed memory banks](https://gitcode.com/lukchiwang/Multi-Agent_Contract_Protocol/-/raw/main/openclaw_plugin/docs/assets/architecture-overview.svg)
+![MACP architecture: lifecycle hooks, contract control plane, and typed memory banks](docs/assets/readme/MultiAgentContractProtocol/architecture_overview.svg)
 
 The protocol has three independent memory mechanisms:
 
@@ -37,7 +37,7 @@ The protocol has three independent memory mechanisms:
 
 ## Enforced handoff
 
-![MACP handoff sequence from spawn to verified completion](https://gitcode.com/lukchiwang/Multi-Agent_Contract_Protocol/-/raw/main/openclaw_plugin/docs/assets/handoff-sequence.svg)
+![MACP handoff sequence from spawn to verified completion](docs/assets/readme/MultiAgentContractProtocol/handoff_sequence.svg)
 
 The control plane observes the runtime, injects scoped memory, gates unresolved handoffs, invalidates stale evidence, and blocks premature completion.
 
