@@ -7,9 +7,11 @@
 [![MultiAgentBench](https://img.shields.io/badge/MultiAgentBench-task%20passed-2ea44f)](../desgin/FINAL_VALIDATION.md)
 [![CooperBench](https://img.shields.io/badge/CooperBench-34%20tests%20passed-2ea44f)](../desgin/FINAL_VALIDATION.md)
 
-![Multi-Agent Memory control plane coordinating guarded agent handoffs](./docs/assets/memory-control-plane-hero.png)
+![Multi-Agent Contract Protocol coordinating verified agent handoffs](./docs/assets/macp-hero.png)
 
 Multi-Agent Memory turns memory from passive prompt context into an active coordination layer. It observes the real OpenClaw agent lifecycle, injects only the memory relevant to each assignment, blocks consumers whose prerequisites are not ready, sends prematurely finishing producers back to complete their artifacts, and refuses final completion until the workflow has objective evidence.
+
+The protocol is designed to be CLI-independent. OpenClaw is the first adapter; the contract model can be reused by any runtime that exposes agent spawn, tool-call, and completion events.
 
 The plugin is role-agnostic: `planner`, `implementer`, and `reviewer` are supported, but arbitrary assignment names and peer topologies work as well. That lets the same control plane serve sequential workflows such as MultiAgentBench and parallel/cooperative workflows such as CooperBench.
 
@@ -87,6 +89,26 @@ The same assignment model supports both shapes:
 - **Atomic persistence:** writes are serialized per bank and committed through temporary-file rename.
 - **Fail-open initialization:** failure to derive initial task memory does not corrupt the original OpenClaw request.
 - **Fail-closed handoffs:** known unresolved workflow obligations block the relevant consumer or completion boundary.
+
+## Quick start
+
+```bash
+git clone https://gitcode.com/lukchiwang/Multi-Agent_Contract_Protocol.git
+cd Multi-Agent_Contract_Protocol/openclaw_plugin
+npm install
+npm test
+npm run build
+```
+
+The OpenClaw adapter is configured through `openclaw.plugin.json`. Dependency, co-domain, and testing memory can be enabled independently for ablation studies or incremental adoption.
+
+## Examples
+
+See [`examples/`](./examples/) for sequential planner/implementer/reviewer workflows, cooperative peer handoffs, and memory-mechanism toggles.
+
+## Validation
+
+Benchmark results and reproducible evaluator commands are documented in [`VALIDATION.md`](./VALIDATION.md). The regression suite covers workspace resolution, concurrent writes, project isolation, artifact observation, contract lifecycle, readiness gates, completion gates, and exact-command evidence.
 
 ## Installation
 
