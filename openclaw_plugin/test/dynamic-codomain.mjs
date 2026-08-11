@@ -26,6 +26,9 @@ File: peer_b/PATCH_READY.md`;
   await writeFile(join(workspace, "peer_a", "PATCH_READY.md"), `# Ready
 ## Changed API
 Public function \`click.edit()\` in \`src/click/termui.py\` adds \`timeout: int | None = None\`.
+The concrete changed file is \`peer_a/src/click/termui.py\`.
+Temporary checks used \`peer_a_selftest.py\` and imported \`termui.py\`.
+Another disposable probe was \`sanity_wd.py\`.
 The default must keep calling \`wait()\`; timeout raises \`ClickException("Editing timed out")\`.
 ## Evidence
 $ python -m pytest tests/test_termui.py -q
@@ -40,6 +43,12 @@ $ python -m pytest tests/test_termui.py -q
 
   const contract = await engine.discoverCoDomainFromHandoffs(workspace, "click-compose", "run-1");
   if (!contract) throw new Error("separate handoffs did not create a co-domain contract");
+  if (contract.artifactIds.some((path) => /selftest|sanity|^termui\.py$/i.test(path))) {
+    throw new Error(`test scaffolding or duplicate basename entered product contract: ${contract.artifactIds}`);
+  }
+  if (contract.artifactIds.some((path) => /^peer_[ab]\//.test(path))) {
+    throw new Error(`producer workspace prefix leaked into integration contract: ${contract.artifactIds}`);
+  }
   if (contract.status !== "agreed") throw new Error(`unexpected state ${contract.status}`);
   for (const expected of ["timeout: int | None = None", "escape_shell: bool = False",
     "wait()", "src/click/termui.py", "same integrated tree"]) {
@@ -54,13 +63,26 @@ $ python -m pytest tests/test_termui.py -q
   if (!blockers.some((item) => item.id === contract.id)) {
     throw new Error("unverified dynamic contract did not block completion");
   }
+  const integration = join(workspace, "integration");
+  await mkdir(join(integration, "src/click"), { recursive: true });
+  await writeFile(join(integration, "src/click/termui.py"), "def edit(): pass\n");
+  await writeFile(join(integration, "src/click/_termui_impl.py"), "class Editor: pass\n");
   await engine.recordCoDomainVerification(workspace, {
-    command: "cd " + workspace + " && python -m pytest tests/test_termui.py -q",
+    command: "cd " + workspace + " && echo checking && cd integration && python -m pytest tests/test_termui.py -q",
     exitCode: 0, projectId: "click-compose", runId: "run-1",
   });
   const verified = (await engine.load("codomain")).items.find((item) => item.id === contract.id);
   if (verified?.status !== "verified") {
     throw new Error(`integration command did not verify contract: ${verified?.status}`);
+  }
+  await engine.recordTestingVerification(workspace, {
+    command: `cd ${integration} && python -m pytest tests/test_termui.py -q`, exitCode: 0,
+    projectId: "click-compose", runId: "run-1",
+  });
+  const testing = (await engine.load("testing")).items
+    .filter((item) => item.projectId === "click-compose" && item.runId === "run-1");
+  if (!testing.length || testing.some((item) => item.status !== "verified")) {
+    throw new Error(`composition testing evidence was not promoted: ${testing.map((item) => item.status)}`);
   }
   console.log("PASS dynamic handoff discovery, integration injection, and verification gate");
 } finally {

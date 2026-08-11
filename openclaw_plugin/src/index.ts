@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 import { readFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { MemoryEngine, type ContractAction, type MemoryKind, type PluginConfig } from "./memory-engine.js";
 
@@ -46,6 +46,12 @@ export function workspaceFromSpawn(task: string, explicit?: unknown, remembered?
   if (stated) return workspaceCandidate(stated);
   const artifact = task.match(/(\/[^`\s,]+\/(?:TASK\.md|plan\.md|solution\.py|implementation\.md|review\.md|PATCH_READY\.md))/i)?.[1];
   return artifact ? dirname(artifact) : "";
+}
+
+export function coordinationRootFrom(candidate: string, toolName: string): string {
+  return toolName === "sessions_spawn"
+    && ["peer_a", "peer_b", "integration"].includes(basename(candidate))
+    ? dirname(candidate) : candidate;
 }
 
 export function appendCoordinatorContinuation(message: any, waitInstruction = "Call sessions_yield now."): any {
@@ -222,7 +228,10 @@ export default definePluginEntry({
         explicitWorkspace,
         ctx.sessionKey ? workspaceBySession.get(ctx.sessionKey) : undefined,
       );
-      if (ctx.sessionKey && observedWorkspace) workspaceBySession.set(ctx.sessionKey, observedWorkspace);
+      if (ctx.sessionKey && observedWorkspace && !workspaceBySession.has(ctx.sessionKey)) {
+        const initialRoot = coordinationRootFrom(observedWorkspace, event.toolName);
+        workspaceBySession.set(ctx.sessionKey, initialRoot);
+      }
       const observedCommand = commandFrom(event.params);
       const toolCallId = event.toolCallId ?? ctx.toolCallId;
       if (observedCommand && observedWorkspace && toolCallId) {
@@ -233,10 +242,30 @@ export default definePluginEntry({
           runId: ctx.sessionKey ? runBySession.get(ctx.sessionKey) : undefined,
         });
       }
+      if (event.toolName === "sessions_yield" && ctx.sessionKey
+        && coordinatedRootSessions.has(ctx.sessionKey)) {
+        const projectId = projectBySession.get(ctx.sessionKey);
+        const runId = runBySession.get(ctx.sessionKey);
+        if (projectId && runId) {
+          if (observedWorkspace) {
+            await engine.observeWorkflow(observedWorkspace, undefined, projectId, runId);
+          }
+          const blockers = await engine.completionBlockers(projectId, runId);
+          if (blockers.length) {
+            const detail = blockers.map((item) =>
+              `${item.id}[${item.lifecycleState ?? item.status ?? "unresolved"}]`).join(", ");
+            return {
+              block: true,
+              blockReason: `Multi-agent coordinator yield blocked while obligations remain: ${detail}. `
+                + "Use one bounded exec wait for the expected child artifacts, inspect them, and continue integration in this turn.",
+            };
+          }
+        }
+      }
       if (event.toolName !== "sessions_spawn") return;
       const task = typeof event.params.task === "string" ? event.params.task : "";
       if (!task.trim()) return;
-      if (ctx.sessionKey && observedWorkspace) {
+      if (ctx.sessionKey && observedWorkspace && !workspaceBySession.has(ctx.sessionKey)) {
         workspaceBySession.set(ctx.sessionKey, observedWorkspace);
       }
       // before_prompt_build does not expose workspaceDir on every OpenClaw
@@ -267,7 +296,8 @@ export default definePluginEntry({
       projectByRun.set(runId, projectId);
       // Native sessions_spawn commonly provides workdir/cwd on the tool call
       // while omitting workspaceDir from hook context.
-      const workspace = observedWorkspace;
+      const workspace = (ctx.sessionKey ? workspaceBySession.get(ctx.sessionKey) : undefined)
+        ?? coordinationRootFrom(observedWorkspace, "sessions_spawn");
       const role = task.toLowerCase().includes("reviewer") ? "reviewer"
         : task.toLowerCase().includes("implementer") ? "implementer"
           : task.toLowerCase().includes("planner") ? "planner" : undefined;
@@ -329,14 +359,22 @@ export default definePluginEntry({
       const exitCode = event.error ? 1 : numericExitCode(event.result)
         ?? (markedExit === undefined ? undefined : Number(markedExit));
       if (exitCode === undefined) return;
+      const projectId = pending?.projectId ?? (ctx.sessionKey ? projectBySession.get(ctx.sessionKey) : undefined);
+      const runId = pending?.runId ?? (ctx.sessionKey ? runBySession.get(ctx.sessionKey) : undefined);
+      const rememberedRoot = ctx.sessionKey ? workspaceBySession.get(ctx.sessionKey) : undefined;
+      const coordinationRoot = rememberedRoot
+        ?? (["integration", "peer_a", "peer_b"].includes(basename(workspace)) ? dirname(workspace) : workspace);
+      if (projectId && runId && coordinationRoot) {
+        await engine.discoverCoDomainFromHandoffs(coordinationRoot, projectId, runId);
+      }
       await engine.recordVerification(workspace, {
         command,
         exitCode,
         source: `after-tool-call:${event.toolName}`,
         output,
         error: event.error,
-        projectId: pending?.projectId ?? (ctx.sessionKey ? projectBySession.get(ctx.sessionKey) : undefined),
-        runId: pending?.runId ?? (ctx.sessionKey ? runBySession.get(ctx.sessionKey) : undefined),
+        projectId,
+        runId,
       });
       await engine.recordCoDomainVerification(workspace, {
         command,
@@ -344,8 +382,17 @@ export default definePluginEntry({
         source: `after-tool-call:${event.toolName}`,
         output,
         error: event.error,
-        projectId: pending?.projectId ?? (ctx.sessionKey ? projectBySession.get(ctx.sessionKey) : undefined),
-        runId: pending?.runId ?? (ctx.sessionKey ? runBySession.get(ctx.sessionKey) : undefined),
+        projectId,
+        runId,
+      });
+      await engine.recordTestingVerification(workspace, {
+        command,
+        exitCode,
+        source: `after-tool-call:${event.toolName}`,
+        output,
+        error: event.error,
+        projectId,
+        runId,
       });
     }, { priority: 80, timeoutMs: 10_000 });
 

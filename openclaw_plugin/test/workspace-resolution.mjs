@@ -1,6 +1,7 @@
 import {
   appendCoordinatorContinuation,
   appendProducerContinuation,
+  coordinationRootFrom,
   workspaceFromSpawn,
 } from "../dist/index.js";
 
@@ -18,6 +19,11 @@ for (const [task, explicit, remembered, expected] of cases) {
   if (actual !== expected) {
     throw new Error(`workspace mismatch: expected=${expected} actual=${actual}`);
   }
+}
+
+if (coordinationRootFrom(`${root}/peer_a`, "sessions_spawn") !== root
+  || coordinationRootFrom(`${root}/integration`, "exec") !== `${root}/integration`) {
+  throw new Error("coordination root was confused with a child/tool working directory");
 }
 
 const producerResult = appendProducerContinuation(

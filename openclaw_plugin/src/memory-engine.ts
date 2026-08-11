@@ -89,6 +89,19 @@ function escapePattern(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+const ARTIFACT_EXTENSIONS = new Set([
+  "c", "cc", "cpp", "css", "go", "h", "hpp", "html", "java", "js", "jsx", "json",
+  "md", "mjs", "py", "rb", "rs", "sh", "sql", "toml", "ts", "tsx", "xml", "yaml", "yml",
+]);
+
+function artifactPath(value: string): string | undefined {
+  const cleaned = value.trim().replace(/^[-*]\s*/, "").replace(/[),.;:]+$/, "");
+  const extension = cleaned.match(/\.([A-Za-z0-9]+)$/)?.[1]?.toLowerCase();
+  if (!extension || !ARTIFACT_EXTENSIONS.has(extension)) return undefined;
+  if (/\s|^https?:/i.test(cleaned)) return undefined;
+  return cleaned.replace(/^\.\//, "");
+}
+
 function score(item: MemoryItem, query: string, sessionKey?: string): number {
   const queryTerms = terms(query);
   const itemTerms = terms([item.title, item.text, ...(item.tags ?? [])].join(" "));
@@ -175,6 +188,13 @@ export function canonicalVerificationCommand(command: string, workspace: string)
   }
   return normalizeIdentity(withoutExitEcho)
     .replace(/(^|\s)python3(?=\s)/g, "$1python");
+}
+
+function commandWorkspace(command: string, workspace: string): string {
+  const matches = [...command.matchAll(/(?:^|&&|;)\s*cd\s+(?:"([^"]+)"|'([^']+)'|([^\s;&]+))/gi)];
+  const cd = matches.at(-1);
+  const target = cd?.[1] ?? cd?.[2] ?? cd?.[3];
+  return target ? resolve(workspace, target) : resolve(workspace);
 }
 
 function verificationCommandsMatch(expected: string, actual: string, workspace: string): boolean {
@@ -473,8 +493,8 @@ export class MemoryEngine {
       const body = match[2].trim().split(/\n(?:Peer\s+\d+|taskName\/label|taskName|label)\s*:/i)[0].trim();
       const title = body.match(/(?:Title|Feature)\s*:\s*([^\n]+)/i)?.[1]?.trim() ?? id;
       const files = [...body.matchAll(/`([^`]+\.[A-Za-z0-9]+)`|(?:Artifact|Files? Modified|File)\s*:\s*[-*]?\s*([^\s,]+)/gi)]
-        .map((entry) => (entry[1] ?? entry[2] ?? "").replace(/^[-*]\s*/, "").trim())
-        .filter(Boolean);
+        .map((entry) => artifactPath(entry[1] ?? entry[2] ?? ""))
+        .filter((entry): entry is string => Boolean(entry));
       return { id, body, title, files: [...new Set(files)] };
     });
     const sharedFiles = assignments[0].files.filter((file) => assignments.slice(1).some((item) => item.files.includes(file)));
@@ -547,14 +567,24 @@ export class MemoryEngine {
       }
       if (!content.trim()) continue;
       const files = [...content.matchAll(/`([^`\n]+\.[A-Za-z0-9]+)`|(?:^|\n)\s*[-*]?\s*([\w./-]+\.[A-Za-z0-9]+)\s*\|/g)]
-        .map((match) => (match[1] ?? match[2] ?? "").trim())
-        .filter((path) => path && !/PATCH_READY\.md$/i.test(path) && !/^https?:/i.test(path));
+        .map((match) => artifactPath(match[1] ?? match[2] ?? ""))
+        .filter((path): path is string => path !== undefined)
+        .filter((path) => !/PATCH_READY\.md$/i.test(path)
+          && !/(?:^|\/)(?:tests?\/|test_[^/]+\.py$|[^/]+_test\.[^/]+$|[^/]*selftest[^/]*$)/i.test(path));
+      const normalizedFiles = files.map((path) => path.startsWith(`${directory}/`)
+        ? path.slice(directory.length + 1) : path);
+      const concreteFiles = normalizedFiles.filter((path) => path.includes("/")
+        || !normalizedFiles.some((other) => other !== path && other.endsWith(`/${path}`)));
       handoffs.push({ assignment: item.assignmentId as string, directory,
-        content: content.slice(0, 7000), files: [...new Set(files)].slice(0, 30) });
+        content: content.slice(0, 7000), files: [...new Set(concreteFiles)].slice(0, 30) });
     }
     if (handoffs.length < 2) return undefined;
 
-    const artifactIds = [...new Set(handoffs.flatMap((handoff) => handoff.files))];
+    const rawArtifactIds = [...new Set(handoffs.flatMap((handoff) => handoff.files))];
+    const structuredPythonLayout = rawArtifactIds.some((path) => path.startsWith("src/") && path.endsWith(".py"));
+    const artifactIds = structuredPythonLayout
+      ? rawArtifactIds.filter((path) => !(path.endsWith(".py") && !path.includes("/")))
+      : rawArtifactIds;
     const participants = handoffs.map((handoff) => handoff.assignment);
     const interfaceId = `handoff-composition:${participants.map(normalizeIdentity).sort().join("+")}`;
     const id = `${projectId}:run:${createHash("sha256").update(runId).digest("hex").slice(0, 10)}:${interfaceId}`;
@@ -564,8 +594,8 @@ export class MemoryEngine {
       return `${handoff.assignment} producer contract (${handoff.directory}):\n${boundary}`;
     };
     const verificationCommands = [...new Set(handoffs.flatMap((handoff) =>
-      [...handoff.content.matchAll(/(?:^|\n)\s*(?:\$\s*)?([^\n]*\b(?:pytest|go\s+test|npm\s+test|cargo\s+test)\b[^\n]*)/gi)]
-        .map((match) => match[1].trim().replace(/^```(?:bash|sh)?\s*/i, ""))
+      [...handoff.content.matchAll(/\b(go\s+test|python\s+-m\s+pytest|pytest|npm\s+test|cargo\s+test)\b([^\n`]*)/gi)]
+        .map((match) => `${match[1]}${match[2]}`.trim().replace(/[)\],;:]+$/, ""))
         .filter((command) => command.length > 3 && command.length < 500)))]
       .slice(0, 6);
     const text = [
@@ -599,32 +629,52 @@ export class MemoryEngine {
   }): Promise<number> {
     if (!input.projectId || !input.runId || !input.command.trim()) return 0;
     const command = canonicalVerificationCommand(input.command, workspace);
+    const verificationRoot = commandWorkspace(input.command, workspace);
+    const broadGoSuite = /\bgo test\b[^;&|\n]*\.\/\.\.\./i.test(command);
+    const broadPytestSuite = /\bpytest\b[^;&|\n]*(?:tests(?:\/|\s|$)|\.\/tests)/i.test(command);
     const codomain = await this.load("codomain");
     let updated = 0;
     for (const item of codomain.items.filter((candidate) => inContext(candidate, input.projectId, input.runId))) {
       const required = item.verificationCommands ?? [];
-      if (!required.length || item.status === "verified") continue;
+      if (item.status === "verified") continue;
+      const genericTest = /(?:^|\s|&&)(?:go\s+test|pytest|python\s+-m\s+pytest|npm\s+test|cargo\s+test)\b/i.test(command);
+      const integrationTest = basename(verificationRoot) === "integration" && genericTest;
       const matches = required.filter((expected) => {
         const key = canonicalVerificationCommand(expected, workspace);
         return key && (command.includes(key) || key.includes(command)
+          || (broadGoSuite && key.includes("go test"))
+          || (broadPytestSuite && key.includes("pytest"))
           || (key.includes("pytest") && command.includes("pytest")
             && key.match(/pytest\s+([^\s]+)/)?.[1] === command.match(/pytest\s+([^\s]+)/)?.[1]));
       });
-      if (!matches.length) continue;
+      if (!matches.length && !integrationTest) continue;
+      const observations = await Promise.all((item.artifactIds ?? []).map((artifact) =>
+        this.observeArtifact(verificationRoot, artifact, input.source ?? "after-tool-call")));
+      const artifactVersions = Object.fromEntries(observations
+        .filter((entry) => entry.exists && entry.sha256)
+        .map((entry) => [entry.artifactId, entry.sha256 as string]));
+      const artifactsPresent = observations.every((entry) => entry.exists && Boolean(entry.sha256));
       const attempt: VerificationAttempt = {
-        command: input.command, exitCode: input.exitCode, passed: input.exitCode === 0,
-        artifactVersions: {}, observedAt: new Date().toISOString(), source: input.source ?? "after-tool-call",
+        command: input.command, exitCode: input.exitCode,
+        passed: input.exitCode === 0 && artifactsPresent,
+        artifactVersions, observedAt: new Date().toISOString(), source: input.source ?? "after-tool-call",
         output: input.output?.slice(0, 2000), error: input.error?.slice(0, 2000),
       };
       const attempts = [...(item.verificationAttempts ?? []), attempt].slice(-30);
       const passedKeys = new Set(attempts.filter((entry) => entry.passed).map((entry) =>
         canonicalVerificationCommand(entry.command, workspace)));
-      const allPassed = required.every((expected) => {
+      const compositionEvidence = /(?:integration|coexist|joint|combined|both.?features)/i
+        .test(`${input.command}\n${input.output ?? ""}`);
+      const allPassed = (required.length === 0 && attempt.passed)
+        || (attempt.passed && compositionEvidence)
+        || (artifactsPresent && required.every((expected) => {
         const key = canonicalVerificationCommand(expected, workspace);
         return [...passedKeys].some((actual) => actual.includes(key) || key.includes(actual)
+          || (/\bgo test\b[^;&|\n]*\.\/\.\.\./i.test(actual) && key.includes("go test"))
+          || (/\bpytest\b[^;&|\n]*(?:tests(?:\/|\s|$)|\.\/tests)/i.test(actual) && key.includes("pytest"))
           || (key.includes("pytest") && actual.includes("pytest")
             && key.match(/pytest\s+([^\s]+)/)?.[1] === actual.match(/pytest\s+([^\s]+)/)?.[1]));
-      });
+      }));
       await this.upsert({ ...item, verificationAttempts: attempts,
         status: allPassed ? "verified" : "agreed",
         evidence: [...(item.evidence ?? []),
@@ -670,7 +720,8 @@ export class MemoryEngine {
       const observed = observations.map((entry) => `${entry.artifactId}=${entry.exists ? `produced@${entry.sha256}` : "missing"}`);
       await this.upsert({
         ...item,
-        status: missing.length ? "unresolved" : changedAfterVerification ? "stale" : item.status,
+        status: missing.length ? "unresolved" : changedAfterVerification ? "stale"
+          : item.verificationCommand ? item.status : "produced",
         lifecycleState,
         artifactObservations: observations,
         text: item.text
@@ -730,6 +781,40 @@ export class MemoryEngine {
     return updated;
   }
 
+  async recordTestingVerification(workspace: string, input: {
+    command: string; exitCode: number; source?: string; output?: string; error?: string;
+    projectId?: string; runId?: string;
+  }): Promise<number> {
+    const verificationRoot = commandWorkspace(input.command, workspace);
+    if (!this.config.testingEnabled || !input.projectId || !input.runId
+      || basename(verificationRoot) !== "integration"
+      || !/(?:^|\s|&&)(?:go\s+test|pytest|python\s+-m\s+pytest|npm\s+test|cargo\s+test)\b/i.test(input.command)) return 0;
+    const testing = await this.load("testing");
+    let updated = 0;
+    for (const item of testing.items.filter((candidate) => inContext(candidate, input.projectId, input.runId)
+      && candidate.tags?.includes("composition") && candidate.status !== "verified")) {
+      const observations = await Promise.all((item.artifactIds ?? []).map((artifact) =>
+        this.observeArtifact(verificationRoot, artifact, input.source ?? "after-tool-call")));
+      const artifactVersions = Object.fromEntries(observations
+        .filter((entry) => entry.exists && entry.sha256)
+        .map((entry) => [entry.artifactId, entry.sha256 as string]));
+      const passed = input.exitCode === 0
+        && observations.every((entry) => entry.exists && Boolean(entry.sha256));
+      const attempt: VerificationAttempt = {
+        command: input.command, exitCode: input.exitCode, passed, artifactVersions,
+        observedAt: new Date().toISOString(), source: input.source ?? "after-tool-call",
+        output: input.output?.slice(0, 2000), error: input.error?.slice(0, 2000),
+      };
+      await this.upsert({ ...item, status: passed ? "verified" : "required",
+        verificationAttempts: [...(item.verificationAttempts ?? []), attempt].slice(-20),
+        evidence: [...(item.evidence ?? []),
+          `integration verification command=${input.command}; exit=${input.exitCode}; passed=${passed}`].slice(-20),
+      });
+      updated += 1;
+    }
+    return updated;
+  }
+
   async readinessBlockers(consumerId?: string, projectId?: string, runId?: string): Promise<MemoryItem[]> {
     if (!consumerId) return [];
     const consumer = normalizeIdentity(consumerId);
@@ -775,7 +860,7 @@ export class MemoryEngine {
   async recordLifecycleOutcome(input: {
     selectedIds: string[]; assignment?: string; outcome: string; error?: string;
   }): Promise<void> {
-    if (input.outcome === "ok") return;
+    if (["ok", "completed", "complete", "success", "succeeded"].includes(input.outcome.trim().toLowerCase())) return;
     const dependency = await this.load("dependency");
     for (const item of dependency.items.filter((candidate) => input.selectedIds.includes(candidate.id))) {
       const outcome: LifecycleOutcome = {
@@ -805,12 +890,16 @@ export class MemoryEngine {
     const focused = input.task.match(new RegExp(
       `(?:taskName/label|taskName|label|assignment|you\\s+are)\\s*[:=]?\\s*['"]?${escaped}['"]?[\\s\\S]{0,1800}`,
       "i"))?.[0] ?? input.task;
-    const rawWorkDir = focused.match(/work only in\s+`([^`]+)`/i)?.[1]
-      ?? focused.match(/working\s+only\s+in(?:\s+the)?(?:\s+workspace)?\s+directory\s*[:=]\s*`?([^`\n]+)`?/i)?.[1]
-      ?? focused.match(/working directory\s*[:=]\s*`?([^`\n]+)`?/i)?.[1]
-      ?? focused.match(/(?:your\s+)?workspace\s+is\s+`?([^`\s]+)`?/i)?.[1]
-      ?? focused.match(/(?:^|\n)Workspace\s*:\s*`?([^`\n]+)`?/i)?.[1];
+    const workDirFrom = (value: string) => value.match(/work(?:ing)?\s+only\s+(?:in|inside)\s+(?:the\s+)?workspace\s+directory\s*:?\s*`?([^`\s(\n]+)/i)?.[1]
+      ?? value.match(/work only in\s+`([^`]+)`/i)?.[1]
+      ?? value.match(/work(?:ing)?\s+only\s+in\s+the\s+workspace\s+directory\s+`([^`]+)`/i)?.[1]
+      ?? value.match(/working\s+only\s+in(?:\s+the)?(?:\s+workspace)?\s+directory\s*[:=]\s*`?([^`\n]+)`?/i)?.[1]
+      ?? value.match(/working directory\s*[:=]\s*`?([^`\n]+)`?/i)?.[1]
+      ?? value.match(/(?:your\s+)?workspace\s+is\s+`?([^`\s]+)`?/i)?.[1]
+      ?? value.match(/\bWorkspace\s*:\s*`?([^`\n]+)`?/i)?.[1];
+    const rawWorkDir = workDirFrom(focused) ?? workDirFrom(input.task);
     let workDirectory = rawWorkDir?.trim().replace(/[\\/]+$/, "");
+    if (workDirectory && /\s/.test(workDirectory)) workDirectory = undefined;
     if (workDirectory && isAbsolute(workDirectory) && input.workspace) {
       const rel = relative(resolve(input.workspace), resolve(workDirectory));
       workDirectory = rel.startsWith("..") || isAbsolute(rel) ? undefined : rel;
@@ -822,14 +911,24 @@ export class MemoryEngine {
       .filter((item) => normalizedSet(item.producerIds).some((id) => sameAssignmentRole(id, assignment)));
     const updated: MemoryItem[] = [];
     for (const item of records) {
+      const declaredReady = (item.artifactIds ?? []).find((artifact) => /PATCH_READY\.md$/i.test(artifact));
+      const declaredDirectory = declaredReady ? dirname(declaredReady) : undefined;
+      const effectiveWorkDirectory = declaredDirectory && declaredDirectory !== "."
+        ? declaredDirectory : workDirectory;
       const artifacts = (item.artifactIds ?? []).map((artifact) =>
-        workDirectory && !artifact.startsWith(workDirectory + "/") ? `${workDirectory}/${artifact}` : artifact);
+        effectiveWorkDirectory && !artifact.startsWith(effectiveWorkDirectory + "/")
+          ? `${effectiveWorkDirectory}/${artifact}` : artifact);
       const readyArtifact = focused.match(/write\s+`?([^`\s]*PATCH_READY\.md)`?/i)?.[1];
-      if (readyArtifact && !artifacts.includes(readyArtifact)) artifacts.push(readyArtifact);
+      const normalizedReadyArtifact = readyArtifact && effectiveWorkDirectory
+        && !readyArtifact.startsWith(`${effectiveWorkDirectory}/`)
+        ? `${effectiveWorkDirectory}/${readyArtifact}` : readyArtifact;
+      if (normalizedReadyArtifact && !artifacts.includes(normalizedReadyArtifact)) {
+        artifacts.push(normalizedReadyArtifact);
+      }
       updated.push(await this.upsert({
         ...item,
         assignmentId: assignment,
-        workDirectory,
+        workDirectory: effectiveWorkDirectory,
         artifactIds: artifacts,
         // Preserve downstream consumers already attached to a prerequisite.
         // Replacing targetRoles with only the producer prevents the observer
@@ -855,7 +954,10 @@ export class MemoryEngine {
     const codomain = await this.load("codomain");
     const contractBlockers = codomain.items.filter((item) => inContext(item, projectId, runId))
       .filter((item) => item.status !== "verified");
-    return [...artifactBlockers, ...contractBlockers];
+    const testing = await this.load("testing");
+    const testingBlockers = testing.items.filter((item) => inContext(item, projectId, runId)
+      && item.tags?.includes("composition") && item.status !== "verified");
+    return [...artifactBlockers, ...contractBlockers, ...testingBlockers];
   }
 
   private async observeArtifact(workspace: string, artifactId: string, source: string): Promise<ArtifactObservation> {

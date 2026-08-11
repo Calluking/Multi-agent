@@ -18,15 +18,20 @@ try {
   await engine.upsert({ id: "contract", kind: "codomain", scope: "shared", projectId: "task", runId: "run",
     interfaceId: "api", artifactIds: ["api"], title: "API", evidence: [], status: "agreed",
     text: "Producer domain=a; Consumer domain=b; Shared data=x; Boundary test=x" });
-  if ((await engine.completionBlockers("task", "run")).length !== 3) {
-    throw new Error("completion gate did not include artifact, verification, and contract blockers");
+  await engine.upsert({ id: "composition-test", kind: "testing", scope: "shared",
+    projectId: "task", runId: "run", title: "composition", text: "run tests", evidence: [],
+    status: "required", tags: ["composition"] });
+  if ((await engine.completionBlockers("task", "run")).length !== 4) {
+    throw new Error("completion gate did not include artifact, verification, contract, and testing blockers");
   }
   const output = (await engine.load("dependency")).items[0];
   const implementation = (await engine.load("dependency")).items.find((item) => item.id === "implementation");
   const contract = (await engine.load("codomain")).items[0];
+  const testing = (await engine.load("testing")).items[0];
   await engine.upsert({ ...output, lifecycleState: "produced", status: "produced" });
   await engine.upsert({ ...implementation, lifecycleState: "verified", status: "verified" });
   await engine.upsert({ ...contract, status: "verified" });
+  await engine.upsert({ ...testing, status: "verified" });
   if ((await engine.completionBlockers("task", "run")).length !== 0) {
     throw new Error("completion gate did not release resolved obligations");
   }

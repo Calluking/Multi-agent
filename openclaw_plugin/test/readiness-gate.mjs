@@ -45,6 +45,13 @@ try {
   if ((await engine.readinessBlockers("reviewer")).length !== 0) {
     throw new Error("reviewer could not consume a produced artifact");
   }
+  await engine.recordLifecycleOutcome({
+    selectedIds: ["task:solution"], assignment: "implementer", outcome: "completed",
+  });
+  const completedSolution = (await engine.load("dependency")).items.find((item) => item.id === "task:solution");
+  if (completedSolution.lifecycleState !== "produced") {
+    throw new Error("successful OpenClaw completion outcome incorrectly blocked a produced artifact");
+  }
 
   await engine.upsert({ ...producedSolution, lifecycleState: "blocked", status: "unresolved",
     recoveryOwnerId: "implementer" });
