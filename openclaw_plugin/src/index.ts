@@ -235,6 +235,16 @@ export default definePluginEntry({
       const observedCommand = commandFrom(event.params);
       const toolCallId = event.toolCallId ?? ctx.toolCallId;
       if (observedCommand && observedWorkspace && toolCallId) {
+        const activeProject = ctx.sessionKey ? projectBySession.get(ctx.sessionKey) : undefined;
+        const activeRun = ctx.sessionKey ? runBySession.get(ctx.sessionKey) : undefined;
+        const activeRoot = ctx.sessionKey ? workspaceBySession.get(ctx.sessionKey) : observedWorkspace;
+        if (activeProject && activeRun && activeRoot) {
+          // Handoff files can exist before OpenClaw emits subagent_ended. Discover
+          // their contract before the coordinator's first boundary command so
+          // that the command can verify it in the same turn.
+          await engine.observeWorkflow(activeRoot, undefined, activeProject, activeRun);
+          await engine.discoverCoDomainFromHandoffs(activeRoot, activeProject, activeRun);
+        }
         commandByToolCall.set(toolCallId, {
           command: observedCommand,
           workspace: observedWorkspace,
@@ -364,6 +374,7 @@ export default definePluginEntry({
       const rememberedRoot = ctx.sessionKey ? workspaceBySession.get(ctx.sessionKey) : undefined;
       const coordinationRoot = rememberedRoot
         ?? (["integration", "peer_a", "peer_b"].includes(basename(workspace)) ? dirname(workspace) : workspace);
+      const coordinator = Boolean(ctx.sessionKey && rootSessionKeys.has(ctx.sessionKey));
       if (projectId && runId && coordinationRoot) {
         await engine.discoverCoDomainFromHandoffs(coordinationRoot, projectId, runId);
       }
@@ -384,6 +395,8 @@ export default definePluginEntry({
         error: event.error,
         projectId,
         runId,
+        coordinator,
+        coordinationRoot,
       });
       await engine.recordTestingVerification(workspace, {
         command,
@@ -393,6 +406,8 @@ export default definePluginEntry({
         error: event.error,
         projectId,
         runId,
+        coordinator,
+        coordinationRoot,
       });
     }, { priority: 80, timeoutMs: 10_000 });
 

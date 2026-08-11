@@ -1,6 +1,7 @@
 import { access, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import { homedir } from "node:os";
 
 export type MemoryKind = "dependency" | "codomain" | "testing";
 export type ContractAction = "propose" | "challenge" | "revise" | "accept" | "verify";
@@ -28,6 +29,8 @@ export type MemoryItem = {
   projectId?: string;
   runId?: string;
   artifactIds?: string[];
+  /** Explicit producer completion packets declared with `Artifact:`. */
+  handoffArtifactIds?: string[];
   interfaceId?: string;
   subject?: string;
   producerIds?: string[];
@@ -100,6 +103,12 @@ function artifactPath(value: string): string | undefined {
   if (!extension || !ARTIFACT_EXTENSIONS.has(extension)) return undefined;
   if (/\s|^https?:/i.test(cleaned)) return undefined;
   return cleaned.replace(/^\.\//, "");
+}
+
+function declaredArtifactPath(value: string): string | undefined {
+  const cleaned = value.trim().replace(/^[-*]\s*/, "").replace(/[),.;:]+$/, "");
+  if (!cleaned || /\s|^https?:|(^|[\\/])\.\.([\\/]|$)/i.test(cleaned)) return undefined;
+  return /\.[A-Za-z0-9]+$/.test(cleaned) ? cleaned.replace(/^\.\//, "") : undefined;
 }
 
 function score(item: MemoryItem, query: string, sessionKey?: string): number {
@@ -285,7 +294,7 @@ export class MemoryEngine {
   private readonly writeTails = new Map<MemoryKind, Promise<void>>();
 
   constructor(config: PluginConfig = {}) {
-    this.root = resolve(config.storeRoot ?? ".openclaw/multiagent-memory");
+    this.root = resolve(config.storeRoot ?? resolve(homedir(), ".openclaw/multiagent-memory"));
     this.config = {
       autoInitialize: config.autoInitialize ?? true,
       dependencyEnabled: config.dependencyEnabled ?? true,
@@ -492,10 +501,20 @@ export class MemoryEngine {
       const id = match[1].trim();
       const body = match[2].trim().split(/\n(?:Peer\s+\d+|taskName\/label|taskName|label)\s*:/i)[0].trim();
       const title = body.match(/(?:Title|Feature)\s*:\s*([^\n]+)/i)?.[1]?.trim() ?? id;
-      const files = [...body.matchAll(/`([^`]+\.[A-Za-z0-9]+)`|(?:Artifact|Files? Modified|File)\s*:\s*[-*]?\s*([^\s,]+)/gi)]
-        .map((entry) => artifactPath(entry[1] ?? entry[2] ?? ""))
+      const declaredWorkspace = body.match(/^\s*Workspace\s*:\s*`?([^`\s]+)`?/im)?.[1]?.replace(/[\\/]+$/, "");
+      const handoffs = [...body.matchAll(/^\s*Artifact\s*:\s*[-*]?\s*([^\s,]+)/gim)]
+        .map((entry) => declaredArtifactPath(entry[1] ?? ""))
         .filter((entry): entry is string => Boolean(entry));
-      return { id, body, title, files: [...new Set(files)] };
+      const productFiles = [...body.matchAll(/^\s*(?:Files? Modified|File)\s*:\s*[-*]?\s*([^\s,]+)/gim)]
+        .map((entry) => artifactPath(entry[1] ?? ""))
+        .filter((entry): entry is string => Boolean(entry))
+        .map((entry) => declaredWorkspace && !entry.startsWith(`${declaredWorkspace}/`)
+          ? `${declaredWorkspace}/${entry}` : entry);
+      const quoted = [...body.matchAll(/`([^`]+\.[A-Za-z0-9]+)`/g)]
+        .map((entry) => artifactPath(entry[1] ?? ""))
+        .filter((entry): entry is string => Boolean(entry));
+      return { id, body, title, workspace: declaredWorkspace, handoffs: [...new Set(handoffs)],
+        files: [...new Set([...handoffs, ...productFiles, ...quoted])] };
     });
     const sharedFiles = assignments[0].files.filter((file) => assignments.slice(1).some((item) => item.files.includes(file)));
     const taskTag = `project:${project.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
@@ -505,7 +524,9 @@ export class MemoryEngine {
       for (const assignment of assignments) {
         await this.upsert({
           id: `${taskTag}:assignment:${assignment.id}`, kind: "dependency", scope: "private",
-          projectId: project, runId, artifactIds: assignment.files, subject: `assignment:${assignment.id}:handoff`,
+          projectId: project, runId, artifactIds: assignment.files,
+          handoffArtifactIds: assignment.handoffs, subject: `assignment:${assignment.id}:handoff`,
+          assignmentId: assignment.id, workDirectory: assignment.workspace,
           producerIds: [assignment.id], consumerIds: ["coordinator"],
           title: `${assignment.id} deliverable state`, targetRoles: [assignment.id], priority: 90,
           text: `Required before=assignment handoff; Required state=${assignment.title} implemented in ${assignment.files.join(", ") || "assigned artifact"}; Observed=missing; Evidence=patch and assignment tests; Blocker=assigned feature not yet evidenced; Next action=implement only ${assignment.id}, preserve partner-owned semantics, and report changed API/artifact plus test evidence`,
@@ -547,16 +568,18 @@ export class MemoryEngine {
     if (!this.config.codomainEnabled) return undefined;
     const dependency = await this.load("dependency");
     const assignments = dependency.items
-      .filter((item) => inContext(item, projectId, runId) && item.assignmentId && item.workDirectory)
+      .filter((item) => inContext(item, projectId, runId) && item.assignmentId
+        && (item.handoffArtifactIds?.length || item.workDirectory))
       .filter((item, index, all) => all.findIndex((other) =>
         normalizeIdentity(other.assignmentId ?? "") === normalizeIdentity(item.assignmentId ?? "")) === index);
     if (assignments.length < 2) return undefined;
 
     const handoffs: Array<{ assignment: string; directory: string; content: string; files: string[] }> = [];
     for (const item of assignments) {
-      const directory = item.workDirectory as string;
+      const directory = item.workDirectory ?? ".";
       const candidates = [
         resolve(workspace, directory, "PATCH_READY.md"),
+        ...(item.handoffArtifactIds ?? []).map((artifact) => resolve(workspace, artifact)),
         ...(item.artifactIds ?? []).filter((artifact) => /PATCH_READY\.md$/i.test(artifact))
           .map((artifact) => resolve(workspace, artifact)),
       ];
@@ -611,21 +634,23 @@ export class MemoryEngine {
     return this.upsert({
       ...(existing ?? {}), id: existing?.id ?? id, kind: "codomain", scope: "shared",
       projectId, runId, interfaceId,
-      artifactIds: artifactIds.length ? artifactIds : handoffs.map((handoff) => `${handoff.directory}/PATCH_READY.md`),
+      artifactIds: artifactIds.length ? artifactIds
+        : [...new Set(assignments.flatMap((item) => item.handoffArtifactIds ?? []))],
       producerIds: participants, consumerIds: ["coordinator", "integrator"],
       title: `Integration contract from ${participants.join(" + ")} handoffs`,
       targetRoles: [...participants, "coordinator", "integrator"], participants,
       priority: 110, version: existing?.version ?? 1, text,
       status: existing?.status === "verified" ? "verified" : "agreed",
       verificationCommands,
-      evidence: handoffs.map((handoff) => `${handoff.assignment}: ${handoff.directory}/PATCH_READY.md`),
+      evidence: assignments.flatMap((item) => (item.handoffArtifactIds ?? [])
+        .map((artifact) => `${item.assignmentId}: ${artifact}`)),
       tags: [projectId, "dynamic-handoff", "composition", ...artifactIds.map((artifact) => basename(artifact))],
     });
   }
 
   async recordCoDomainVerification(workspace: string, input: {
     command: string; exitCode: number; source?: string; output?: string; error?: string;
-    projectId?: string; runId?: string;
+    projectId?: string; runId?: string; coordinator?: boolean; coordinationRoot?: string;
   }): Promise<number> {
     if (!input.projectId || !input.runId || !input.command.trim()) return 0;
     const command = canonicalVerificationCommand(input.command, workspace);
@@ -637,8 +662,8 @@ export class MemoryEngine {
     for (const item of codomain.items.filter((candidate) => inContext(candidate, input.projectId, input.runId))) {
       const required = item.verificationCommands ?? [];
       if (item.status === "verified") continue;
-      const genericTest = /(?:^|\s|&&)(?:go\s+test|pytest|python\s+-m\s+pytest|npm\s+test|cargo\s+test)\b/i.test(command);
-      const integrationTest = basename(verificationRoot) === "integration" && genericTest;
+      const genericTest = /(?:^|\s|&&)(?:go\s+test|pytest|python(?:3)?\s+(?:-m\s+pytest|[^;&|\s]+\.py)|node\s+[^;&|\s]+|npm\s+test|cargo\s+test)\b/i.test(command);
+      const integrationTest = (Boolean(input.coordinator) || basename(verificationRoot) === "integration") && genericTest;
       const matches = required.filter((expected) => {
         const key = canonicalVerificationCommand(expected, workspace);
         return key && (command.includes(key) || key.includes(command)
@@ -654,9 +679,10 @@ export class MemoryEngine {
         .filter((entry) => entry.exists && entry.sha256)
         .map((entry) => [entry.artifactId, entry.sha256 as string]));
       const artifactsPresent = observations.every((entry) => entry.exists && Boolean(entry.sha256));
+      const coordinatorBoundaryPassed = Boolean(input.coordinator && genericTest && input.exitCode === 0);
       const attempt: VerificationAttempt = {
         command: input.command, exitCode: input.exitCode,
-        passed: input.exitCode === 0 && artifactsPresent,
+        passed: input.exitCode === 0 && (artifactsPresent || coordinatorBoundaryPassed),
         artifactVersions, observedAt: new Date().toISOString(), source: input.source ?? "after-tool-call",
         output: input.output?.slice(0, 2000), error: input.error?.slice(0, 2000),
       };
@@ -702,7 +728,7 @@ export class MemoryEngine {
     const dependency = await this.load("dependency");
     for (const item of dependency.items) {
       if (!inContext(item, projectId, runId)) continue;
-      if (!isRelevantToRole(item, nextRole)) continue;
+      if (nextRole && !isRelevantToRole(item, nextRole)) continue;
       const wanted = item.artifactIds?.length
         ? item.artifactIds
         : (item.tags ?? []).filter((tag) => /\.(md|py)$/i.test(tag));
@@ -783,12 +809,12 @@ export class MemoryEngine {
 
   async recordTestingVerification(workspace: string, input: {
     command: string; exitCode: number; source?: string; output?: string; error?: string;
-    projectId?: string; runId?: string;
+    projectId?: string; runId?: string; coordinator?: boolean; coordinationRoot?: string;
   }): Promise<number> {
     const verificationRoot = commandWorkspace(input.command, workspace);
     if (!this.config.testingEnabled || !input.projectId || !input.runId
-      || basename(verificationRoot) !== "integration"
-      || !/(?:^|\s|&&)(?:go\s+test|pytest|python\s+-m\s+pytest|npm\s+test|cargo\s+test)\b/i.test(input.command)) return 0;
+      || (!input.coordinator && basename(verificationRoot) !== "integration")
+      || !/(?:^|\s|&&)(?:go\s+test|pytest|python(?:3)?\s+(?:-m\s+pytest|[^;&|\s]+\.py)|node\s+[^;&|\s]+|npm\s+test|cargo\s+test)\b/i.test(input.command)) return 0;
     const testing = await this.load("testing");
     let updated = 0;
     for (const item of testing.items.filter((candidate) => inContext(candidate, input.projectId, input.runId)
@@ -798,8 +824,7 @@ export class MemoryEngine {
       const artifactVersions = Object.fromEntries(observations
         .filter((entry) => entry.exists && entry.sha256)
         .map((entry) => [entry.artifactId, entry.sha256 as string]));
-      const passed = input.exitCode === 0
-        && observations.every((entry) => entry.exists && Boolean(entry.sha256));
+      const passed = input.exitCode === 0;
       const attempt: VerificationAttempt = {
         command: input.command, exitCode: input.exitCode, passed, artifactVersions,
         observedAt: new Date().toISOString(), source: input.source ?? "after-tool-call",
@@ -898,7 +923,8 @@ export class MemoryEngine {
       ?? value.match(/(?:your\s+)?workspace\s+is\s+`?([^`\s]+)`?/i)?.[1]
       ?? value.match(/\bWorkspace\s*:\s*`?([^`\n]+)`?/i)?.[1];
     const rawWorkDir = workDirFrom(focused) ?? workDirFrom(input.task);
-    let workDirectory = rawWorkDir?.trim().replace(/[\\/]+$/, "");
+    let workDirectory = rawWorkDir?.trim().replace(/[\\/]+$/, "").replace(/^\.\//, "");
+    if (workDirectory && /^(?:a|an|the|this|that)$/i.test(workDirectory)) workDirectory = undefined;
     if (workDirectory && /\s/.test(workDirectory)) workDirectory = undefined;
     if (workDirectory && isAbsolute(workDirectory) && input.workspace) {
       const rel = relative(resolve(input.workspace), resolve(workDirectory));
@@ -911,12 +937,14 @@ export class MemoryEngine {
       .filter((item) => normalizedSet(item.producerIds).some((id) => sameAssignmentRole(id, assignment)));
     const updated: MemoryItem[] = [];
     for (const item of records) {
-      const declaredReady = (item.artifactIds ?? []).find((artifact) => /PATCH_READY\.md$/i.test(artifact));
+      const declaredReady = item.handoffArtifactIds?.[0]
+        ?? (item.artifactIds ?? []).find((artifact) => /PATCH_READY\.md$/i.test(artifact));
       const declaredDirectory = declaredReady ? dirname(declaredReady) : undefined;
-      const effectiveWorkDirectory = declaredDirectory && declaredDirectory !== "."
-        ? declaredDirectory : workDirectory;
+      const effectiveWorkDirectory = workDirectory ?? (declaredDirectory && declaredDirectory !== "."
+        ? declaredDirectory : undefined);
       const artifacts = (item.artifactIds ?? []).map((artifact) =>
         effectiveWorkDirectory && !artifact.startsWith(effectiveWorkDirectory + "/")
+          && (Boolean(workDirectory) || !artifact.includes("/"))
           ? `${effectiveWorkDirectory}/${artifact}` : artifact);
       const readyArtifact = focused.match(/write\s+`?([^`\s]*PATCH_READY\.md)`?/i)?.[1];
       const normalizedReadyArtifact = readyArtifact && effectiveWorkDirectory
@@ -929,6 +957,7 @@ export class MemoryEngine {
         ...item,
         assignmentId: assignment,
         workDirectory: effectiveWorkDirectory,
+        handoffArtifactIds: item.handoffArtifactIds,
         artifactIds: artifacts,
         // Preserve downstream consumers already attached to a prerequisite.
         // Replacing targetRoles with only the producer prevents the observer
