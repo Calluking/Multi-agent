@@ -22,7 +22,7 @@ try {
     throw new Error("planner was allowed to finalize before producing its artifact");
   }
   if ((await engine.producerBlockers("implementer", "task", undefined)).map((item) => item.id).join() !== "task:solution") {
-    throw new Error("implementer was allowed to finalize before producing and verifying its artifact");
+    throw new Error("implementer was allowed to finalize before producing its artifact");
   }
 
   if ((await engine.readinessBlockers("planner")).length !== 0) throw new Error("producer was blocked by its own output");
@@ -37,7 +37,21 @@ try {
   if ((await engine.readinessBlockers("implementer")).length !== 0) {
     throw new Error("non-command artifact did not become consumable when produced");
   }
-  if ((await engine.readinessBlockers("reviewer")).length !== 1) throw new Error("reviewer was not gated");
+  const producedSolution = (await engine.load("dependency")).items.find((item) => item.id === "task:solution");
+  await engine.upsert({ ...producedSolution, lifecycleState: "produced", status: "produced" });
+  if ((await engine.producerBlockers("implementer", "task", undefined)).length !== 0) {
+    throw new Error("implementer remained blocked after producing its artifact");
+  }
+  if ((await engine.readinessBlockers("reviewer")).length !== 0) {
+    throw new Error("reviewer could not consume a produced artifact");
+  }
+
+  await engine.upsert({ ...producedSolution, lifecycleState: "blocked", status: "unresolved",
+    recoveryOwnerId: "implementer" });
+  const suffixedAdmission = await engine.recoveryAdmission("implementer2", "task", undefined);
+  if (!suffixedAdmission.allowed || suffixedAdmission.obligations.length !== 1) {
+    throw new Error("role-equivalent recovery assignment was not admitted");
+  }
 
   await engine.recordLifecycleOutcome({
     selectedIds: ["task:solution"], assignment: "implementer", outcome: "timeout", error: "turn timed out",
@@ -52,7 +66,9 @@ try {
   const packet = await engine.buildSpawnPacket("Implement solution.py after timeout", undefined,
     "implementer", "task", undefined);
   if (!packet.packet.includes("BOUNDED RECOVERY OBLIGATION")
-    || !packet.packet.includes("materially changed strategy")) {
+    || !packet.packet.includes("materially changed strategy")
+    || !packet.packet.includes("DURABLE OUTPUT PROTOCOL")
+    || !packet.packet.includes("small valid checkpoint")) {
     throw new Error("recovery directive was not injected");
   }
   await engine.recordLifecycleOutcome({

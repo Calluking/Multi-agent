@@ -20,9 +20,38 @@ try {
     throw new Error("unrelated command verified an artifact");
   }
   await engine.recordVerification(workspace, {
-    command: "python3 solution.py", exitCode: 1, error: "failed",
+    command: "python solution.py --test", exitCode: 0, output: "ok",
   });
   let item = (await engine.load("dependency")).items[0];
+  if (item.lifecycleState !== "verified") {
+    throw new Error("equivalent Python command variant did not verify artifact");
+  }
+  await engine.upsert({ ...item, lifecycleState: "produced", status: "produced",
+    verificationAttempts: [], evidence: [] });
+  await engine.recordVerification(workspace, {
+    command: "echo begin && python3 solution.py --test; echo 'test exit: 0'",
+    exitCode: 0, output: "test exit: 0",
+  });
+  item = (await engine.load("dependency")).items[0];
+  if (item.lifecycleState !== "verified") {
+    throw new Error("compound executable command did not verify artifact");
+  }
+  await engine.upsert({ ...item, lifecycleState: "produced", status: "produced",
+    verificationAttempts: [], evidence: [] });
+  await engine.recordVerification(workspace, {
+    command: "python3 - <<'EOF'\nfrom solution import run_demo\nrun_demo()\nEOF",
+    exitCode: 0, output: "PASS",
+  });
+  item = (await engine.load("dependency")).items[0];
+  if (item.lifecycleState !== "verified") {
+    throw new Error("behavioral import harness did not verify artifact");
+  }
+  await engine.upsert({ ...item, lifecycleState: "produced", status: "produced",
+    verificationAttempts: [], evidence: [] });
+  await engine.recordVerification(workspace, {
+    command: "python3 solution.py", exitCode: 1, error: "failed",
+  });
+  item = (await engine.load("dependency")).items[0];
   if (item.lifecycleState !== "blocked" || item.verificationAttempts.at(-1).passed) {
     throw new Error("failed command did not create a blocking attempt");
   }

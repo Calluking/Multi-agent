@@ -126,7 +126,7 @@ function normalizedRoles(item: MemoryItem): string[] {
 function isRelevantToRole(item: MemoryItem, role?: string): boolean {
   const roles = normalizedRoles(item);
   if (!roles.length) return true;
-  return Boolean(role && roles.includes(role.toLowerCase()));
+  return Boolean(role && roles.some((candidate) => sameAssignmentRole(candidate, role)));
 }
 
 function isCurrent(item: MemoryItem): boolean {
@@ -146,6 +146,20 @@ function normalizeIdentity(value: string): string {
   return value.toLowerCase().replace(/\\/g, "/").replace(/\s+/g, " ").trim();
 }
 
+function roleIdentity(value: string): string {
+  const normalized = normalizeIdentity(value);
+  for (const role of ["planner", "implementer", "reviewer", "coordinator"]) {
+    if (new RegExp(`(^|[^a-z])${role}(?:[^a-z]|$)`, "i").test(normalized)) return role;
+  }
+  return normalized;
+}
+
+function sameAssignmentRole(left: string, right: string): boolean {
+  const a = roleIdentity(left);
+  const b = roleIdentity(right);
+  return Boolean(a && b && a === b);
+}
+
 export function canonicalVerificationCommand(command: string, workspace: string): string {
   const withoutExitEcho = command.trim().replace(
     /\s*;\s*echo\s+["']?EXIT\s*=\s*\$\?["']?\s*$/i,
@@ -155,10 +169,34 @@ export function canonicalVerificationCommand(command: string, workspace: string)
   if (segments.length > 1) {
     const cd = segments[0].match(/^cd\s+(["']?)(.+?)\1$/i);
     if (cd && resolve(cd[2]) === resolve(workspace)) {
-      return normalizeIdentity(segments.slice(1).join(" && "));
+      return normalizeIdentity(segments.slice(1).join(" && "))
+        .replace(/(^|\s)python3(?=\s)/g, "$1python");
     }
   }
-  return normalizeIdentity(withoutExitEcho);
+  return normalizeIdentity(withoutExitEcho)
+    .replace(/(^|\s)python3(?=\s)/g, "$1python");
+}
+
+function verificationCommandsMatch(expected: string, actual: string, workspace: string): boolean {
+  const wanted = canonicalVerificationCommand(expected, workspace);
+  const observed = canonicalVerificationCommand(actual, workspace);
+  if (!wanted || !observed) return false;
+  if (wanted === observed || observed.startsWith(`${wanted} `)
+    || wanted.startsWith(`${observed} `)) return true;
+  const escaped = wanted.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (new RegExp(`(?:^|&&|\\|\\||;)\\s*${escaped}(?=$|\\s|;|&&|\\|\\||[<>])`).test(observed)) {
+    return true;
+  }
+  // A reviewer may use a Python heredoc that imports the deliverable and
+  // exercises its public API instead of invoking its interactive entrypoint.
+  // Count that as executable evidence, but never accept syntax-only checks.
+  const pythonArtifact = wanted.match(/^python\s+([^\s;]+)/)?.[1];
+  if (pythonArtifact && /(?:^|[;&|])\s*python\s+-\s+<</.test(observed)
+    && !/py_compile|compileall/.test(observed)) {
+    const stem = basename(pythonArtifact).replace(/\.py$/i, "");
+    return new RegExp(`\\b(?:from\\s+${escapePattern(stem)}\\s+import|import\\s+${escapePattern(stem)}\\b)`).test(observed);
+  }
+  return false;
 }
 
 function normalizedSet(values: string[] | undefined): string[] {
@@ -655,8 +693,7 @@ export class MemoryEngine {
     for (const item of dependency.items) {
       if (!inContext(item, input.projectId, input.runId)) continue;
       if (!item.verificationCommand
-        || canonicalVerificationCommand(item.verificationCommand, workspace)
-          !== canonicalVerificationCommand(command, workspace)) continue;
+        || !verificationCommandsMatch(item.verificationCommand, command, workspace)) continue;
       const artifacts = item.artifactIds ?? [];
       if (!artifacts.length) continue;
       const observations = await Promise.all(artifacts.map((artifact) =>
@@ -664,8 +701,10 @@ export class MemoryEngine {
       const artifactVersions = Object.fromEntries(observations
         .filter((entry) => entry.exists && entry.sha256)
         .map((entry) => [entry.artifactId, entry.sha256 as string]));
-      const innerExit = input.output?.match(/\bEXIT\s*=\s*(\d+)\b/i)?.[1];
-      const passed = input.exitCode === 0 && (innerExit === undefined || Number(innerExit) === 0)
+      const exitMarkers = [...(input.output ?? "").matchAll(
+        /\b(?:EXIT|EXIT_STATUS|SELFTEST_EXIT|PRIMARY_EXIT_STATUS|CLI_EXIT|test\s+exit|demo\s+exit)\s*[:=]\s*(\d+)\b/gi,
+      )].map((match) => Number(match[1]));
+      const passed = input.exitCode === 0 && exitMarkers.every((code) => code === 0)
         && observations.every((entry) => entry.exists && Boolean(entry.sha256));
       const attempt: VerificationAttempt = {
         command,
@@ -697,10 +736,10 @@ export class MemoryEngine {
     const dependency = await this.load("dependency");
     return dependency.items.filter((item) => inContext(item, projectId, runId))
       .filter((item) => !projectId || !runId || Boolean(item.projectId && item.runId))
-      .filter((item) => normalizedSet(item.consumerIds).includes(consumer))
-      .filter((item) => item.verificationCommand
-        ? item.lifecycleState !== "verified" && item.lifecycleState !== "ready"
-        : !["produced", "verified", "ready"].includes(item.lifecycleState ?? ""));
+      .filter((item) => normalizedSet(item.consumerIds).some((id) => sameAssignmentRole(id, consumer)))
+      // The consumer/reviewer supplies verification. Requiring verification
+      // before admitting that consumer makes the handoff circular.
+      .filter((item) => !["produced", "verified", "ready"].includes(item.lifecycleState ?? ""));
   }
 
   async producerBlockers(producerId?: string, projectId?: string, runId?: string): Promise<MemoryItem[]> {
@@ -709,10 +748,8 @@ export class MemoryEngine {
     const dependency = await this.load("dependency");
     return dependency.items.filter((item) => inContext(item, projectId, runId))
       .filter((item) => !projectId || !runId || Boolean(item.projectId && item.runId))
-      .filter((item) => normalizedSet(item.producerIds).includes(producer))
-      .filter((item) => item.verificationCommand
-        ? item.lifecycleState !== "verified" && item.lifecycleState !== "ready"
-        : !["produced", "verified", "ready"].includes(item.lifecycleState ?? ""));
+      .filter((item) => normalizedSet(item.producerIds).some((id) => sameAssignmentRole(id, producer)))
+      .filter((item) => !["produced", "verified", "ready"].includes(item.lifecycleState ?? ""));
   }
 
   async recoveryAdmission(assignmentId: string, projectId: string, runId: string): Promise<{
@@ -721,7 +758,7 @@ export class MemoryEngine {
     const assignment = normalizeIdentity(assignmentId);
     const dependency = await this.load("dependency");
     const obligations = dependency.items.filter((item) => inContext(item, projectId, runId))
-      .filter((item) => normalizeIdentity(item.recoveryOwnerId ?? "") === assignment)
+      .filter((item) => sameAssignmentRole(item.recoveryOwnerId ?? "", assignment))
       .filter((item) => item.lifecycleState === "blocked");
     const exhausted = obligations.filter((item) =>
       (item.lifecycleOutcomes ?? []).filter((outcome) => outcome.outcome !== "ok").length
@@ -782,7 +819,7 @@ export class MemoryEngine {
 
     const dependency = await this.load("dependency");
     const records = dependency.items.filter((item) => inContext(item, input.projectId, input.runId))
-      .filter((item) => normalizedSet(item.producerIds).includes(normalizeIdentity(assignment)));
+      .filter((item) => normalizedSet(item.producerIds).some((id) => sameAssignmentRole(id, assignment)));
     const updated: MemoryItem[] = [];
     for (const item of records) {
       const artifacts = (item.artifactIds ?? []).map((artifact) =>
@@ -807,8 +844,11 @@ export class MemoryEngine {
     const dependency = await this.load("dependency");
     const artifactBlockers = dependency.items.filter((item) => inContext(item, projectId, runId))
       .filter((item) => Boolean(item.projectId && item.runId))
-      .filter((item) => (item.consumerIds ?? []).some((consumer) =>
-        ["completion", "coordinator"].includes(normalizeIdentity(consumer))))
+      // Terminal artifacts must exist, and every configured verification must
+      // be current even when its immediate consumer was the reviewer.
+      .filter((item) => Boolean(item.verificationCommand)
+        || (item.consumerIds ?? []).some((consumer) =>
+          ["completion", "coordinator"].includes(roleIdentity(consumer))))
       .filter((item) => item.verificationCommand
         ? item.lifecycleState !== "verified" && item.lifecycleState !== "ready"
         : !["produced", "verified", "ready"].includes(item.lifecycleState ?? ""));
@@ -872,7 +912,7 @@ export class MemoryEngine {
     if (!sections.length) return { packet: "", selected, role };
     const recoveryItems = (await this.load("dependency")).items
       .filter((item) => selected.dependency.includes(item.id) && item.recoveryOwnerId
-        && normalizeIdentity(item.recoveryOwnerId) === normalizeIdentity(role ?? "")
+        && sameAssignmentRole(item.recoveryOwnerId, role ?? "")
         && item.lifecycleState === "blocked");
     const recoveryDirective = recoveryItems.length ? [
       "BOUNDED RECOVERY OBLIGATION",
@@ -889,6 +929,13 @@ export class MemoryEngine {
         "\n\n--- MULTI-AGENT MEMORY CONTEXT (plugin-injected) ---",
         ...sections,
         recoveryDirective,
+        selected.dependency.length ? [
+          "DURABLE OUTPUT PROTOCOL",
+          "- A prose plan or acknowledgment is not progress on an artifact obligation.",
+          "- After necessary reads, the first production action must be a write/edit/apply-patch tool call.",
+          "- For a large artifact, write a small valid checkpoint first and extend it through bounded edits. Never generate the whole artifact in one response; an output-limit stop would discard it before a file exists.",
+          "- Inspect the durable files and run the configured evidence command before reporting completion.",
+        ].join("\n") : "",
         `Target role: ${role ?? "unclassified"}. Only records relevant to this role/boundary were selected.`,
         "Use these records as current working context. Dependency readiness is observer-owned: never update it through a memory or contract tool. Co-domain records describe product/API semantics, not Agent handoffs; use multiagent_contract_transition only for a lifecycle change to an explicitly selected co-domain record. Testing records define evidence standards.",
         "--- END MULTI-AGENT MEMORY CONTEXT ---",

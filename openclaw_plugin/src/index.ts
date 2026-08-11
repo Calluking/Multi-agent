@@ -68,8 +68,10 @@ export function appendProducerContinuation(message: any, assignment: string, obl
     "[Multi-Agent Memory producer gate]",
     `You are ${assignment}; a prose acknowledgment is not a deliverable.`,
     `Before your final response, satisfy and inspect every assigned obligation: ${obligationIds.join(", ") || "assigned artifacts"}.`,
+    "Do not draft, simulate, or describe a deliverable in assistant prose. Compose it through a write/edit/apply-patch tool call; long prose/code generation can hit the output limit before any file is written.",
+    "For a large deliverable, make a small valid checkpoint in the next tool call (well below the model output limit), then extend it through additional bounded edit/apply-patch calls. Never attempt the whole large artifact in one model response.",
     "If verification is required, run it only after all final artifact writes; a command run before the last write is stale evidence.",
-    "Your next action must continue with the necessary file or verification tool unless every obligation is already satisfied.",
+    "Your next assistant action must begin with the necessary file or verification tool call unless every obligation is already satisfied.",
   ].join(" ");
   const content = Array.isArray(message.content) ? [...message.content] : [];
   content.push({ type: "text", text: instruction });
@@ -163,10 +165,10 @@ export default definePluginEntry({
         if (sessionKey && !alreadyInitialized) {
           initializedRootSessions.add(sessionKey);
           rootSessionKeys.add(sessionKey);
+          // Keep the coordinator turn alive. sessions_yield ends the current
+          // CLI turn and callers can mistake that boundary for completion.
           waitInstructionBySession.set(sessionKey,
-            /bounded\s+exec\s+wait|exec\s+wait/i.test(prompt)
-              ? "Call one bounded exec wait for the producer's expected artifact now; inspect it when the command returns."
-              : "Call sessions_yield now and continue only after the producer completion event arrives.");
+            "Call one bounded exec wait for the producer's expected artifact now; inspect it when the command returns.");
         }
         const workspace = String(ctx?.workspaceDir ?? event?.workspaceDir
           ?? (sessionKey ? workspaceBySession.get(sessionKey) : "") ?? "");
