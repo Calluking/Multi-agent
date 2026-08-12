@@ -501,18 +501,18 @@ export class MemoryEngine {
       const id = match[1].trim();
       const body = match[2].trim().split(/\n(?:Peer\s+\d+|taskName\/label|taskName|label)\s*:/i)[0].trim();
       const title = body.match(/(?:Title|Feature)\s*:\s*([^\n]+)/i)?.[1]?.trim() ?? id;
-      const declaredWorkspace = body.match(/^\s*Workspace\s*:\s*`?([^`\s]+)`?/im)?.[1]?.replace(/[\\/]+$/, "");
+      const declaredWorkspace = body.match(/^\s*(?:Workspace|Work directory)\s*:\s*`?([^`\s]+)`?/im)?.[1]?.replace(/[\\/]+$/, "");
       const handoffs = [...body.matchAll(/^\s*Artifact\s*:\s*[-*]?\s*([^\s,]+)/gim)]
         .map((entry) => declaredArtifactPath(entry[1] ?? ""))
         .filter((entry): entry is string => Boolean(entry));
       const productFiles = [...body.matchAll(/^\s*(?:Files? Modified|File)\s*:\s*[-*]?\s*([^\s,]+)/gim)]
         .map((entry) => artifactPath(entry[1] ?? ""))
         .filter((entry): entry is string => Boolean(entry))
-        .map((entry) => declaredWorkspace && !entry.startsWith(`${declaredWorkspace}/`)
-          ? `${declaredWorkspace}/${entry}` : entry);
+        ;
       const quoted = [...body.matchAll(/`([^`]+\.[A-Za-z0-9]+)`/g)]
         .map((entry) => artifactPath(entry[1] ?? ""))
-        .filter((entry): entry is string => Boolean(entry));
+        .filter((entry): entry is string => Boolean(entry && entry.includes("/")))
+        ;
       return { id, body, title, workspace: declaredWorkspace, handoffs: [...new Set(handoffs)],
         files: [...new Set([...handoffs, ...productFiles, ...quoted])] };
     });
@@ -524,7 +524,9 @@ export class MemoryEngine {
       for (const assignment of assignments) {
         await this.upsert({
           id: `${taskTag}:assignment:${assignment.id}`, kind: "dependency", scope: "private",
-          projectId: project, runId, artifactIds: assignment.files,
+          projectId: project, runId, artifactIds: assignment.files.map((artifact) =>
+            assignment.workspace && !artifact.startsWith(`${assignment.workspace}/`)
+              ? `${assignment.workspace}/${artifact}` : artifact),
           handoffArtifactIds: assignment.handoffs, subject: `assignment:${assignment.id}:handoff`,
           assignmentId: assignment.id, workDirectory: assignment.workspace,
           producerIds: [assignment.id], consumerIds: ["coordinator"],
@@ -654,6 +656,8 @@ export class MemoryEngine {
   }): Promise<number> {
     if (!input.projectId || !input.runId || !input.command.trim()) return 0;
     const command = canonicalVerificationCommand(input.command, workspace);
+    const reportedTestFailure = /(?:^|\n)(?:FAILED\s|=+\s*FAILURES\s*=+|\d+\s+failed\b)/im
+      .test(input.output ?? "");
     const verificationRoot = commandWorkspace(input.command, workspace);
     const broadGoSuite = /\bgo test\b[^;&|\n]*\.\/\.\.\./i.test(command);
     const broadPytestSuite = /\bpytest\b[^;&|\n]*(?:tests(?:\/|\s|$)|\.\/tests)/i.test(command);
@@ -662,7 +666,7 @@ export class MemoryEngine {
     for (const item of codomain.items.filter((candidate) => inContext(candidate, input.projectId, input.runId))) {
       const required = item.verificationCommands ?? [];
       if (item.status === "verified") continue;
-      const genericTest = /(?:^|\s|&&)(?:go\s+test|pytest|python(?:3)?\s+(?:-m\s+pytest|[^;&|\s]+\.py)|node\s+[^;&|\s]+|npm\s+test|cargo\s+test)\b/i.test(command);
+      const genericTest = /(?:^|&&|;)\s*(?:go\s+test|pytest(?!\s+--version)|python(?:3)?\s+(?:-m\s+pytest(?!\s+--version)|[^;&|\s]+\.py)|node\s+[^;&|\s]+|npm\s+test|cargo\s+test)\b/i.test(command);
       const integrationTest = (Boolean(input.coordinator) || basename(verificationRoot) === "integration") && genericTest;
       const matches = required.filter((expected) => {
         const key = canonicalVerificationCommand(expected, workspace);
@@ -679,20 +683,20 @@ export class MemoryEngine {
         .filter((entry) => entry.exists && entry.sha256)
         .map((entry) => [entry.artifactId, entry.sha256 as string]));
       const artifactsPresent = observations.every((entry) => entry.exists && Boolean(entry.sha256));
-      const coordinatorBoundaryPassed = Boolean(input.coordinator && genericTest && input.exitCode === 0);
+      const coordinatorBoundaryPassed = Boolean(input.coordinator && genericTest
+        && input.exitCode === 0 && !reportedTestFailure);
       const attempt: VerificationAttempt = {
         command: input.command, exitCode: input.exitCode,
-        passed: input.exitCode === 0 && (artifactsPresent || coordinatorBoundaryPassed),
+        passed: input.exitCode === 0 && !reportedTestFailure
+          && (artifactsPresent || coordinatorBoundaryPassed),
         artifactVersions, observedAt: new Date().toISOString(), source: input.source ?? "after-tool-call",
         output: input.output?.slice(0, 2000), error: input.error?.slice(0, 2000),
       };
       const attempts = [...(item.verificationAttempts ?? []), attempt].slice(-30);
       const passedKeys = new Set(attempts.filter((entry) => entry.passed).map((entry) =>
         canonicalVerificationCommand(entry.command, workspace)));
-      const compositionEvidence = /(?:integration|coexist|joint|combined|both.?features)/i
-        .test(`${input.command}\n${input.output ?? ""}`);
       const allPassed = (required.length === 0 && attempt.passed)
-        || (attempt.passed && compositionEvidence)
+        || (coordinatorBoundaryPassed && attempt.passed)
         || (artifactsPresent && required.every((expected) => {
         const key = canonicalVerificationCommand(expected, workspace);
         return [...passedKeys].some((actual) => actual.includes(key) || key.includes(actual)
@@ -814,7 +818,7 @@ export class MemoryEngine {
     const verificationRoot = commandWorkspace(input.command, workspace);
     if (!this.config.testingEnabled || !input.projectId || !input.runId
       || (!input.coordinator && basename(verificationRoot) !== "integration")
-      || !/(?:^|\s|&&)(?:go\s+test|pytest|python(?:3)?\s+(?:-m\s+pytest|[^;&|\s]+\.py)|node\s+[^;&|\s]+|npm\s+test|cargo\s+test)\b/i.test(input.command)) return 0;
+      || !/(?:^|&&|;)\s*(?:go\s+test|pytest(?!\s+--version)|python(?:3)?\s+(?:-m\s+pytest(?!\s+--version)|[^;&|\s]+\.py)|node\s+[^;&|\s]+|npm\s+test|cargo\s+test)\b/i.test(input.command)) return 0;
     const testing = await this.load("testing");
     let updated = 0;
     for (const item of testing.items.filter((candidate) => inContext(candidate, input.projectId, input.runId)
@@ -824,7 +828,9 @@ export class MemoryEngine {
       const artifactVersions = Object.fromEntries(observations
         .filter((entry) => entry.exists && entry.sha256)
         .map((entry) => [entry.artifactId, entry.sha256 as string]));
-      const passed = input.exitCode === 0;
+      const reportedTestFailure = /(?:^|\n)(?:FAILED\s|=+\s*FAILURES\s*=+|\d+\s+failed\b)/im
+        .test(input.output ?? "");
+      const passed = input.exitCode === 0 && !reportedTestFailure;
       const attempt: VerificationAttempt = {
         command: input.command, exitCode: input.exitCode, passed, artifactVersions,
         observedAt: new Date().toISOString(), source: input.source ?? "after-tool-call",
@@ -947,9 +953,14 @@ export class MemoryEngine {
           && (Boolean(workDirectory) || !artifact.includes("/"))
           ? `${effectiveWorkDirectory}/${artifact}` : artifact);
       const readyArtifact = focused.match(/write\s+`?([^`\s]*PATCH_READY\.md)`?/i)?.[1];
-      const normalizedReadyArtifact = readyArtifact && effectiveWorkDirectory
-        && !readyArtifact.startsWith(`${effectiveWorkDirectory}/`)
-        ? `${effectiveWorkDirectory}/${readyArtifact}` : readyArtifact;
+      let relativeReadyArtifact = readyArtifact;
+      if (relativeReadyArtifact && isAbsolute(relativeReadyArtifact) && input.workspace) {
+        const rel = relative(resolve(input.workspace), resolve(relativeReadyArtifact));
+        relativeReadyArtifact = rel.startsWith("..") || isAbsolute(rel) ? undefined : rel;
+      }
+      const normalizedReadyArtifact = relativeReadyArtifact && effectiveWorkDirectory
+        && !relativeReadyArtifact.startsWith(`${effectiveWorkDirectory}/`)
+        ? `${effectiveWorkDirectory}/${relativeReadyArtifact}` : relativeReadyArtifact;
       if (normalizedReadyArtifact && !artifacts.includes(normalizedReadyArtifact)) {
         artifacts.push(normalizedReadyArtifact);
       }

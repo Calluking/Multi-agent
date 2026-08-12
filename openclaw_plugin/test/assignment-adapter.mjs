@@ -106,7 +106,7 @@ Modify \`src/click/termui.py\` and expose \`Editor.working_dir\`.`;
   if (misleadingProse[0].workDirectory !== "peer_a") {
     throw new Error(`inferred prose overrode declared assignment ownership: ${misleadingProse[0].workDirectory}`);
   }
-  console.log("PASS universal assignment workdir and artifact ownership adapter");
+console.log("PASS universal assignment workdir and artifact ownership adapter");
 } finally {
   await rm(root, { recursive: true, force: true });
 }

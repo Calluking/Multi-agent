@@ -198,14 +198,15 @@ npm test
 
 Covered behaviors include concurrent writes, deduplication, project isolation, universal assignment adaptation, artifact observation, version-bound verification, producer/consumer readiness, lifecycle recovery, completion gating, contract state transitions, targeting, and co-domain filtering.
 
-End-to-end evidence:
+End-to-end internal evidence:
 
 | Benchmark | Topology | Result |
 |---|---|---|
-| MultiAgentBench task 1 | planner → implementer → reviewer | evaluator: **90/100**; functional verification: `ALL TESTS PASSED` |
-| CooperBench task 0 | two independent peers → integration | evaluator: **100/100**; combined repository and feature suites: `34 passed` |
+| Universal prompt suite | five varied multi-agent topologies | **5/5** mechanisms and external checks passed |
+| MultiAgentBench five-task adaptation | planner → implementer → reviewer | **4.20/5** evaluator mean; 5/5 valid runs |
+| CooperBench-derived five-task harness | two peers → integration | **5/10** feature tests; 2/5 complete pairs |
 
-See [validation details](../desgin/FINAL_VALIDATION.md), the [architecture design](./DESIGN.md), and the [implementation progress record](../desgin/PROGRESS.md).
+The CooperBench-derived number is not an official CooperBench score. The failed experimental official adapter has been removed; [`benchmarks/cooperbench`](./benchmarks/cooperbench/) documents the gated rebuild required before CooperBench support can be claimed. See [validation details](./VALIDATION.md) and the [architecture design](./DESIGN.md).
 
 ## Repository layout
 
@@ -218,6 +219,9 @@ openclaw_plugin/
 ├── skills/                  # bundled agent-facing usage guidance
 ├── seed/                    # optional initial memory-bank records
 ├── test/                    # behavioral regression suites
+├── benchmarks/
+│   ├── multiagentbench/     # working coding-task adaptation and judge
+│   └── cooperbench/         # clean-restart gates; adapter not yet implemented
 ├── DESIGN.md                # detailed design decisions
 ├── VALIDATION.md            # plugin validation notes
 └── openclaw.plugin.json     # plugin manifest and configuration schema

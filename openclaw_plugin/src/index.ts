@@ -155,6 +155,7 @@ export default definePluginEntry({
     const projectByRun = new Map<string, string>();
     const runBySession = new Map<string, string>();
     const waitInstructionBySession = new Map<string, string>();
+    const rootBlockersBySession = new Map<string, string>();
     const commandByToolCall = new Map<string, {
       command: string; workspace: string; projectId?: string; runId?: string;
     }>();
@@ -409,6 +410,16 @@ export default definePluginEntry({
         coordinator,
         coordinationRoot,
       });
+      if (ctx.sessionKey && rootSessionKeys.has(ctx.sessionKey)
+        && coordinatedRootSessions.has(ctx.sessionKey) && projectId && runId) {
+        const blockers = await engine.completionBlockers(projectId, runId);
+        if (blockers.length) {
+          rootBlockersBySession.set(ctx.sessionKey, blockers.map((item) =>
+            `${item.id}[${item.lifecycleState ?? item.status ?? "unresolved"}]`).join(", "));
+        } else {
+          rootBlockersBySession.delete(ctx.sessionKey);
+        }
+      }
     }, { priority: 80, timeoutMs: 10_000 });
 
     // A finalize revision is deliberately ignored by OpenClaw after tools with
@@ -421,6 +432,18 @@ export default definePluginEntry({
         const waitInstruction = ctx.sessionKey ? waitInstructionBySession.get(ctx.sessionKey) : undefined;
         return { message: appendCoordinatorContinuation(event.message, waitInstruction) };
       }
+      if (ctx.sessionKey && rootSessionKeys.has(ctx.sessionKey)
+        && coordinatedRootSessions.has(ctx.sessionKey)) {
+        const summary = rootBlockersBySession.get(ctx.sessionKey);
+        if (summary) {
+            const message: any = event.message && typeof event.message === "object" ? event.message : {};
+            const content = Array.isArray(message.content) ? [...message.content] : [];
+            content.push({ type: "text", text: "[Multi-Agent Memory root continuation] "
+              + `This tool result is not task completion. Unresolved obligations: ${summary}. `
+              + "Your next response must continue with tool calls: observe missing producer artifacts, run every producer-specific boundary command in the integrated tree, repair failures, and only finish after all contracts and composition tests are verified." });
+            return { message: { ...message, content } };
+        }
+      }
       const child = ctx.sessionKey ? childLedger.get(ctx.sessionKey) : undefined;
       if (!child || !child.assignment) return;
       return {
@@ -432,8 +455,8 @@ export default definePluginEntry({
       };
     }, { priority: 80, timeoutMs: 10_000 });
 
-    api.on("before_agent_finalize", async (event) => {
-      const sessionKey = event.sessionKey ?? "";
+    api.on("before_agent_finalize", async (event, ctx) => {
+      const sessionKey = event.sessionKey ?? ctx.sessionKey ?? "";
       if (!sessionKey || event.stopHookActive) return;
       const child = childLedger.get(sessionKey);
       if (child) {
@@ -463,7 +486,7 @@ export default definePluginEntry({
       if (!coordinatedRootSessions.has(sessionKey)) return;
       const projectId = projectBySession.get(sessionKey);
       const runId = runBySession.get(sessionKey);
-      const workspace = event.cwd ?? workspaceBySession.get(sessionKey);
+      const workspace = event.cwd ?? (ctx as any).workspaceDir ?? workspaceBySession.get(sessionKey);
       if (!projectId || !runId) return;
       if (workspace) {
         await engine.observeWorkflow(workspace, undefined, projectId, runId);

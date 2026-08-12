@@ -23,16 +23,15 @@ All listed regression scripts pass on the current release branch.
 
 | Benchmark | Configuration | Result |
 |---|---|---|
-| MultiAgentBench task 1 | Testing-only ablation | 95/100 evaluator mean |
-| CooperBench task 0 | Testing-only ablation | 2/2 evaluator tests passed |
-| MultiAgentBench five-task panel | Repaired full plugin | 87/100 |
-| CooperBench five-task panel | Repaired full plugin | 20/100; one paired task passed |
+| Universal prompt suite | Full plugin, five varied topologies | 5/5 mechanisms and external checks passed |
+| MultiAgentBench five-task adaptation | Full plugin | 4.20/5 evaluator mean; 5/5 valid runs |
+| CooperBench-derived five-task harness | Full plugin | 5/10 feature tests; 2/5 complete pairs |
 
-The panel scores are retained as honest baselines for future improvements. The focused co-domain work also passes the combined cross-feature composition test, while two individual feature semantics remain known follow-up work.
+The MultiAgentBench runner is an adaptation. The CooperBench-derived result came from the earlier custom coordinator/integration harness and is not an official CooperBench score. Its old without-plugin 0/100 result is invalid because those runs produced no evaluable patches and their manifests became stale.
 
 ## Reproduction
 
-Benchmark harnesses and raw reports live under the parent repository's `experiments/` and `desgin/FINAL_VALIDATION.md`. The plugin's own tests are self-contained and do not require benchmark model credentials.
+The reproducible MultiAgentBench integration lives in [`benchmarks/multiagentbench`](./benchmarks/multiagentbench/). The previous CooperBench adapter failed official end-to-end validation and has been removed; [`benchmarks/cooperbench`](./benchmarks/cooperbench/) now documents the clean, gated rebuild. The plugin's own tests are self-contained and do not require benchmark model credentials.
 
 ---
 
