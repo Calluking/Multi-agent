@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-import argparse, hashlib, json, os, re, subprocess, time
+import argparse, hashlib, json, os, re, shutil, subprocess, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-OPENCLAW = os.environ.get("OPENCLAW_BIN", "openclaw")
+OPENCLAW = os.environ.get("OPENCLAW_BIN") or shutil.which("openclaw")
+if not OPENCLAW:
+    local_openclaw = Path.home() / ".local/bin/openclaw"
+    OPENCLAW = str(local_openclaw) if local_openclaw.is_file() else "openclaw"
 MODEL = os.environ.get("BENCHMARK_JUDGE_MODEL", os.environ.get("BENCHMARK_MODEL", "deepseek/deepseek-v4-flash"))
 JUDGE_TEMPLATE = """
 [Context]
@@ -49,11 +52,20 @@ OUT, SUMMARY = HERE / "scores.jsonl", HERE / "score_comparison.json"
 def call(cmd, cwd=HERE, timeout=720):
     return subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, timeout=timeout)
 
+def plugin_enabled():
+    result = call([OPENCLAW, "config", "get",
+                   "plugins.entries.multi-agent-contract-protocol.enabled"],
+                  timeout=20)
+    return result.returncode == 0 and result.stdout.strip().lower() == "true"
+
 def toggle(enabled):
     value = "true" if enabled else "false"
-    result = call([OPENCLAW, "config", "set", "plugins.entries.multi-agent-contract-protocol.enabled", value, "--strict-json"], timeout=120)
-    try: call(["timeout", "25s", OPENCLAW, "gateway", "restart"], timeout=35)
-    except subprocess.TimeoutExpired: pass
+    print(f"judge setup: plugin enabled={value}", flush=True)
+    result = call([OPENCLAW, "config", "set", "plugins.entries.multi-agent-contract-protocol.enabled", value, "--strict-json"], timeout=20)
+    try:
+        call([OPENCLAW, "gateway", "restart"], timeout=60)
+    except subprocess.TimeoutExpired:
+        print("judge setup: gateway restart timed out; continuing after bounded wait", flush=True)
     time.sleep(3)
     return result.returncode
 
@@ -130,6 +142,7 @@ def main():
             first, last = map(int, part.split("-", 1)); task_ids.extend(range(first, last + 1))
         else: task_ids.append(int(part))
     rows = prior_scores()
+    original_state = plugin_enabled()
     try:
         toggle(False)
         for task_id in task_ids:
@@ -141,6 +154,7 @@ def main():
                 rows[key] = row
                 print(json.dumps({"condition": condition, "task": task_id, "mean": row["mean"]}), flush=True)
         print(json.dumps(summarize(rows, task_ids), indent=2), flush=True)
-    finally: toggle(True)
+    finally:
+        toggle(original_state)
 
 if __name__ == "__main__": main()

@@ -1,5 +1,8 @@
 # MultiAgentBench integration
 
+For prerequisites, one-command A/B execution, resume behavior, and result
+validation, see [`RUNBOOK.md`](RUNBOOK.md).
+
 This directory preserves the working OpenClaw adaptation used to evaluate the coding subset. It is intentionally separate from the production plugin.
 
 ## Requirements
@@ -8,7 +11,7 @@ This directory preserves the working OpenClaw adaptation used to evaluate the co
 - The MARBLE `coding_main.jsonl` dataset.
 - MACP installed as `multi-agent-contract-protocol`.
 
-## Run
+## Run a matched comparison
 
 ```bash
 export MAB_DATASET=/path/to/MARBLE/multiagentbench/coding/coding_main.jsonl
@@ -19,6 +22,10 @@ python3 run.py with_plugin --tasks 1-5
 python3 evaluate.py --tasks 1-5
 ```
 
-The two conditions use the same task text, orchestration prompt, model and limits. The condition controls only whether MACP is enabled. Outputs are written below this directory and are ignored by Git.
+The runner uses the original lightweight OpenClaw wrapper prompt: multi-agent
+work is optional and `solution.py` is the only required deliverable. Re-running
+a condition resumes outputs only when their prompt hash matches the current
+prompt. Both conditions use the same task, prompt, model, and limits; only MACP
+enablement differs.
 
 This is a MultiAgentBench adaptation, not the upstream MARBLE execution environment. Report it with that qualification.

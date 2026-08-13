@@ -7,25 +7,27 @@ HERE = Path(__file__).resolve().parent
 DATASET = Path(os.environ.get("MAB_DATASET", "../MARBLE/multiagentbench/coding/coding_main.jsonl")).expanduser().resolve()
 MEMORY_ROOT = Path(os.environ.get("MACP_STORE_ROOT", "~/.openclaw/multiagent-memory")).expanduser()
 MODEL = os.environ.get("BENCHMARK_MODEL", "deepseek/deepseek-v4-flash")
-OPENCLAW = os.environ.get("OPENCLAW_BIN", shutil.which("openclaw") or "openclaw")
-PROMPT = """Complete TASK.md through exactly three native OpenClaw child Agents.
+MAX_INFRA_RETRIES = int(os.environ.get("BENCHMARK_MAX_INFRA_RETRIES", "2"))
+OPENCLAW = os.environ.get("OPENCLAW_BIN") or shutil.which("openclaw")
+if not OPENCLAW:
+    local_openclaw = Path.home() / ".local/bin/openclaw"
+    OPENCLAW = str(local_openclaw) if local_openclaw.is_file() else "openclaw"
+PROMPT_TEMPLATE = """You are solving a MultiAgentBench coding task using OpenClaw.
 
-- Spawn a planner responsible only for plan.md.
-- After plan.md exists, spawn an implementer responsible only for solution.py and implementation.md.
-- After solution.py and implementation.md exist, spawn a reviewer responsible only for executable verification and review.md.
+Use OpenClaw multi-agent mode if helpful. Spawn subagents for planning, coding, and review when useful.
 
-Do not implement the task in the coordinator. Do not start a later child before the preceding artifacts exist. After each spawn, use one bounded exec wait of at most 180 seconds that checks only the expected artifact; do not use sessions_yield. Inspect each artifact before continuing.
+Task:
+{task}
 
-Finally run the solution's primary executable verification independently. Do not finish until plan.md, solution.py, implementation.md, and review.md all exist and review.md records the exact verification command, exit status, and result.
+Final deliverable:
+Write the complete answer to solution.py in the current workspace.
 """
-AGENTS = """# Controlled MultiAgentBench comparison
 
-Work only in this directory. Treat TASK.md as the sole product specification.
-Use native sessions_spawn for child Agents. Do not create Agents through shell commands.
-Do not read or copy artifacts from any other experiment directory.
-Do not use MARBLE profiles or previous benchmark results.
-Do not run git commands.
-"""
+def task_text(item):
+    return item["task"]["content"].strip()
+
+def starting_prompt(item):
+    return PROMPT_TEMPLATE.format(task=task_text(item))
 
 def run(cmd, cwd, timeout=700):
     return subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, timeout=timeout)
@@ -60,18 +62,24 @@ def toggle_plugin(enabled):
 
 def run_one(condition, item):
     task_id = int(item["task_id"])
+    prompt = starting_prompt(item)
+    prompt_sha256 = hashlib.sha256(prompt.encode()).hexdigest()
     workspace = HERE / condition / f"task_{task_id:02d}"
     if (workspace / "run_manifest.json").exists():
         previous = json.loads((workspace / "run_manifest.json").read_text())
-        if previous.get("root_exit") == 0:
+        if (previous.get("root_exit") == 0
+                and previous.get("prompt_sha256") == prompt_sha256
+                and previous.get("artifacts", {}).get("solution.py")):
             return previous
-        archived = workspace.with_name(workspace.name + f"_failed_root_{int(time.time())}")
-        workspace.rename(archived)
-    if workspace.exists(): shutil.rmtree(workspace)
-    workspace.mkdir(parents=True)
-    task = "# Official coding task\n\n" + item["task"]["content"] + "\n"
+        archived = HERE / "archived" / str(int(time.time())) / condition / workspace.name
+        archived.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(workspace, archived)
+    workspace.mkdir(parents=True, exist_ok=True)
+    for child in workspace.iterdir():
+        if child.is_dir(): shutil.rmtree(child)
+        else: child.unlink()
+    task = "# Official coding task\n\n" + task_text(item) + "\n"
     (workspace / "TASK.md").write_text(task)
-    (workspace / "AGENTS.md").write_text(AGENTS)
     (workspace / "official_task.json").write_text(json.dumps(item, indent=2)+"\n")
     if condition == "with_plugin": empty_memory()
     agent = f"fair20-{condition}-t{task_id:02d}-{uuid.uuid4().hex[:6]}"
@@ -83,15 +91,21 @@ def run_one(condition, item):
     attempt = 0
     while True:
         attempt += 1
+        print(f"{condition} task={task_id:02d} root attempt={attempt} starting", flush=True)
         try:
             proc = run([OPENCLAW, "agent", "--agent", agent, "--session-id", session,
                         "--model", MODEL, "--thinking", "off", "--timeout", "600", "--json",
-                        "--message", PROMPT], workspace)
+                        "--message", prompt], workspace)
         except subprocess.TimeoutExpired as exc:
             provider_timeouts += 1
             marker = f"Outer runner timeout after {exc.timeout}s; retrying same task as infrastructure failure.\n"
             (workspace / f"root.attempt_{attempt}.stderr").write_text(marker)
-            time.sleep(min(300, 60 * provider_timeouts))
+            if provider_timeouts > MAX_INFRA_RETRIES:
+                raise RuntimeError(
+                    f"infrastructure timeout after {provider_timeouts} attempts")
+            delay = min(300, 60 * provider_timeouts)
+            print(f"{condition} task={task_id:02d} infrastructure timeout; retrying in {delay}s", flush=True)
+            time.sleep(delay)
             continue
         (workspace / f"root.attempt_{attempt}.stderr").write_text(proc.stderr)
         error = (proc.stderr or "").lower()
@@ -102,7 +116,12 @@ def run_one(condition, item):
             provider_timeouts += 1
             # Upstream outages are not benchmark outcomes. Cool down and retry
             # the exact same prompt, Agent, model, session, and workspace.
-            time.sleep(min(300, 60 * provider_timeouts))
+            if provider_timeouts > MAX_INFRA_RETRIES:
+                raise RuntimeError(
+                    f"provider failure after {provider_timeouts} attempts")
+            delay = min(300, 60 * provider_timeouts)
+            print(f"{condition} task={task_id:02d} provider failure; retrying in {delay}s", flush=True)
+            time.sleep(delay)
             continue
         break
     assert proc is not None
@@ -116,20 +135,19 @@ def run_one(condition, item):
             if source.exists(): shutil.copyfile(source, snapshot / source.name)
     manifest = {
         "condition": condition, "task_id": task_id, "model": MODEL,
-        "prompt_sha256": hashlib.sha256(PROMPT.encode()).hexdigest(),
+        "prompt_sha256": prompt_sha256,
         "task_sha256": hashlib.sha256(task.encode()).hexdigest(),
-        "agents_sha256": hashlib.sha256(AGENTS.encode()).hexdigest(),
         "agent": agent, "session": session, "root_exit": proc.returncode,
         "elapsed_seconds": elapsed,
-        "artifacts": {name: (workspace/name).is_file() for name in ("plan.md","solution.py","implementation.md","review.md")},
+        "artifacts": {"solution.py": (workspace/"solution.py").is_file()},
     }
+    manifest["complete"] = proc.returncode == 0 and all(manifest["artifacts"].values())
     (workspace / "run_manifest.json").write_text(json.dumps(manifest, indent=2))
     return manifest
 
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument("condition", choices=["without_plugin","with_plugin"]); ap.add_argument("--tasks",default="1-20"); ap.add_argument("--dataset", type=Path, default=DATASET)
     args=ap.parse_args()
-    toggle_plugin(args.condition == "with_plugin")
     wanted=[]
     for part in args.tasks.split(","):
         if "-" in part:
@@ -137,8 +155,25 @@ def main():
         else: wanted.append(int(part))
     if not args.dataset.is_file(): ap.error(f"MultiAgentBench dataset not found: {args.dataset}; set --dataset or MAB_DATASET")
     tasks={int(x["task_id"]):x for x in (json.loads(line) for line in args.dataset.read_text().splitlines() if line.strip())}
-    progress=HERE/f"progress_{args.condition}.jsonl"
+    pending=[]
     for task_id in wanted:
+        manifest_path=HERE/args.condition/f"task_{task_id:02d}"/"run_manifest.json"
+        try:
+            previous=json.loads(manifest_path.read_text())
+            expected_prompt=hashlib.sha256(starting_prompt(tasks[task_id]).encode()).hexdigest()
+            if (previous.get("root_exit") == 0
+                    and previous.get("prompt_sha256") == expected_prompt
+                    and previous.get("artifacts", {}).get("solution.py")):
+                print(f"{args.condition} task={task_id:02d} cached complete", flush=True)
+                continue
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        pending.append(task_id)
+    if not pending:
+        return
+    toggle_plugin(args.condition == "with_plugin")
+    progress=HERE/f"progress_{args.condition}.jsonl"
+    for task_id in pending:
         try:
             result=run_one(args.condition,tasks[task_id]); status="ok"
         except Exception as exc:

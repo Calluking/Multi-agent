@@ -1,5 +1,8 @@
 # CooperBench integration
 
+For copy-paste setup, execution, evaluation, and validity checks, see
+[`RUNBOOK.md`](RUNBOOK.md).
+
 This integration starts from CooperBench's native CLI and evaluator. The
 verified baseline uses the repository's `mini_swe_agent_v2`, Docker backend,
 and DeepSeek without importing or patching CooperBench.

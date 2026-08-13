@@ -139,7 +139,7 @@ def main() -> None:
     session = f"{args.name}-{int(time.time())}"
     started = time.time()
     proc = run([args.openclaw, "agent", "--agent", agent_id, "--session-id", session,
-                "--local", "--model", args.model, "--thinking", "off", "--timeout", "1200", "--json",
+                "--model", args.model, "--thinking", "off", "--timeout", "1200", "--json",
                 "--message", task_prompt], workspace, 1500, False)
     (workspace / "root.stdout.json").write_text(proc.stdout)
     (workspace / "root.stderr").write_text(proc.stderr)
