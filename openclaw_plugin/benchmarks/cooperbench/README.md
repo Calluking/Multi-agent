@@ -101,13 +101,19 @@ below passes with one frozen model and configuration.
 
 1. Run the native CooperBench baseline without importing MACP. **Passed.**
 2. Run an OpenClaw coordinator with two feature owners. **Passed with plugin.**
-3. Run the identical adapter with the plugin disabled. **Pending.**
+3. Run the identical adapter with the plugin disabled. **Passed.**
 4. Enable dependency memory and validate its trace invariant. **Passed.**
-5. Enable co-domain memory and validate its trace invariant. **Passed.**
-6. Enable testing-practice memory and validate its trace invariant. **Detection fixed; fresh acceptance pending.**
+5. Enable co-domain memory and validate its trace invariant. **Discovery passed; combined-tree enforcement pending.**
+6. Enable testing-practice memory and validate its trace invariant. **Record creation passed; combined-tree enforcement pending.**
 7. Require two non-empty standard cooperative patches. **Passed.**
 8. Run `cooperbench eval` and retain its native output. **Passed: 100% for `[1,2]`.**
-9. Execute matched disabled/enabled trials with every non-plugin variable fixed.
+9. Execute matched disabled/enabled trials with every non-plugin variable fixed. **Runnable five-pair baseline complete: 2/5 versus 2/5.**
+
+The frozen baseline and its raw-memory interpretation are documented in
+[`RUNBOOK.md`](RUNBOOK.md). In particular, successful handoff collection must
+not be confused with verified integration correctness: the current repair
+target is to require one merged integration tree and current evidence for all
+co-domain and testing obligations before coordinator completion.
 
 ## Fixed-comparison rule
 

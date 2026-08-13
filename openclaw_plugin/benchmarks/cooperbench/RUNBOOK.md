@@ -69,9 +69,62 @@ enablement may differ. Do not score missing/partial patches as an agent-quality
 result when the trace contains a gateway lock, provider timeout, or interrupted
 coordinator. Preserve the run directory and stderr for diagnosis.
 
-## 5. Known verified results
+## 5. Frozen runnable baseline (commit `7713026`)
 
-- Official solo task `17070`, all three pairs: 2/3 (66.7%).
-- Plugin-enabled OpenClaw pair `[1,2]`: passed the native evaluator twice.
-- A clean matched plugin-off/plugin-on aggregate remains pending; gateway-lock
-  interrupted attempts are not valid baseline scores.
+The current adapter is runnable end to end with the commands above. A frozen
+five-pair comparison used these cases:
+
+| Task | Feature pair |
+| --- | --- |
+| `17070` | `1,2` |
+| `17070` | `1,3` |
+| `17070` | `2,3` |
+| `17244` | `1,2` |
+| `17244` | `1,3` |
+
+Native CooperBench evaluation produced **2/5 without the plugin and 2/5 with
+the plugin**. The plugin nevertheless changed control-plane behavior: clean
+coordinator completion improved from 1/5 to 5/5, two harvested producer
+handoffs improved from 1/5 to 5/5, and session-lock failures fell from 4/5 to
+0/5.
+
+This is the preserved runnable baseline, not proof that all three memory
+mechanisms enforce implementation correctness.
+
+## 6. Known correctness-enforcement gap
+
+Inspect the memory store after an enabled run:
+
+```bash
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+root = Path('~/.openclaw/multiagent-memory').expanduser()
+for kind in ('dependency', 'codomain', 'testing'):
+    bank = json.loads((root / f'{kind}.json').read_text())
+    rows = [item for item in bank.get('items', [])
+            if 'cooperbench' in json.dumps(item).lower()]
+    print(kind, [(row.get('id'), row.get('status')) for row in rows])
+PY
+```
+
+In the frozen five-pair run, dependency memory observed all 10 producer
+handoffs, but only 2/5 co-domain contracts and 2/10 producer testing records
+were verified. Some coordinators still finalized while contracts remained
+`agreed` and tests remained `required`.
+
+Therefore interpret this revision as follows:
+
+- dependency/handoff enforcement is working;
+- co-domain discovery is working, but combined-tree verification is incomplete;
+- testing-practice records are created, but combined-tree evidence is not yet
+  enforced reliably;
+- a valid correctness comparison requires applying both producer patches to
+  one integration tree, running every producer boundary suite there, repairing
+  failures, and blocking completion until co-domain and composition-testing
+  records are verified.
+
+Do not publish the 2/5 versus 2/5 result as evidence that MACP improves or does
+not improve implementation quality. It is a reproducible adapter baseline for
+the next enforcement repair.
