@@ -23,6 +23,11 @@ Final deliverable:
 Write the complete answer to solution.py in the current workspace.
 """
 
+def code_revision():
+    proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=HERE, text=True,
+                          capture_output=True)
+    return proc.stdout.strip() if proc.returncode == 0 else "unknown"
+
 def task_text(item):
     return item["task"]["content"].strip()
 
@@ -68,6 +73,7 @@ def run_one(condition, item):
     if (workspace / "run_manifest.json").exists():
         previous = json.loads((workspace / "run_manifest.json").read_text())
         if (previous.get("root_exit") == 0
+                and previous.get("code_revision") == code_revision()
                 and previous.get("prompt_sha256") == prompt_sha256
                 and previous.get("artifacts", {}).get("solution.py")):
             return previous
@@ -135,6 +141,7 @@ def run_one(condition, item):
             if source.exists(): shutil.copyfile(source, snapshot / source.name)
     manifest = {
         "condition": condition, "task_id": task_id, "model": MODEL,
+        "code_revision": code_revision(),
         "prompt_sha256": prompt_sha256,
         "task_sha256": hashlib.sha256(task.encode()).hexdigest(),
         "agent": agent, "session": session, "root_exit": proc.returncode,
@@ -162,6 +169,7 @@ def main():
             previous=json.loads(manifest_path.read_text())
             expected_prompt=hashlib.sha256(starting_prompt(tasks[task_id]).encode()).hexdigest()
             if (previous.get("root_exit") == 0
+                    and previous.get("code_revision") == code_revision()
                     and previous.get("prompt_sha256") == expected_prompt
                     and previous.get("artifacts", {}).get("solution.py")):
                 print(f"{args.condition} task={task_id:02d} cached complete", flush=True)
