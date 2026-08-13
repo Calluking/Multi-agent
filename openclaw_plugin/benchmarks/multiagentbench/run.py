@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+RUN_ROOT = Path(os.environ.get("MAB_RUN_ROOT", str(HERE))).expanduser().resolve()
 DATASET = Path(os.environ.get("MAB_DATASET", "../MARBLE/multiagentbench/coding/coding_main.jsonl")).expanduser().resolve()
 MEMORY_ROOT = Path(os.environ.get("MACP_STORE_ROOT", "~/.openclaw/multiagent-memory")).expanduser()
 MODEL = os.environ.get("BENCHMARK_MODEL", "deepseek/deepseek-v4-flash")
@@ -69,7 +70,7 @@ def run_one(condition, item):
     task_id = int(item["task_id"])
     prompt = starting_prompt(item)
     prompt_sha256 = hashlib.sha256(prompt.encode()).hexdigest()
-    workspace = HERE / condition / f"task_{task_id:02d}"
+    workspace = RUN_ROOT / condition / f"task_{task_id:02d}"
     if (workspace / "run_manifest.json").exists():
         previous = json.loads((workspace / "run_manifest.json").read_text())
         if (previous.get("root_exit") == 0
@@ -77,7 +78,7 @@ def run_one(condition, item):
                 and previous.get("prompt_sha256") == prompt_sha256
                 and previous.get("artifacts", {}).get("solution.py")):
             return previous
-        archived = HERE / "archived" / str(int(time.time())) / condition / workspace.name
+        archived = RUN_ROOT / "archived" / str(int(time.time())) / condition / workspace.name
         archived.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(workspace, archived)
     workspace.mkdir(parents=True, exist_ok=True)
@@ -180,7 +181,8 @@ def main():
     if not pending:
         return
     toggle_plugin(args.condition == "with_plugin")
-    progress=HERE/f"progress_{args.condition}.jsonl"
+    RUN_ROOT.mkdir(parents=True, exist_ok=True)
+    progress=RUN_ROOT/f"progress_{args.condition}.jsonl"
     for task_id in pending:
         try:
             result=run_one(args.condition,tasks[task_id]); status="ok"
