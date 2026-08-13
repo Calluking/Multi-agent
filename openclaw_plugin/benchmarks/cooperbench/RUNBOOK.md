@@ -158,3 +158,18 @@ Observed evidence: two submitted producer handoffs; both exact producer suites
 passed with 46 tests in the same integration tree; four focused joint tests
 passed; co-domain and composition-testing records reached `verified`; and the
 native CooperBench evaluator reported **1/1 passed**.
+
+The repaired revision was then validated on the complete frozen five-pair set:
+
+| Task | Feature pair | Native evaluation |
+| --- | --- | --- |
+| `17070` | `1,2` | pass |
+| `17070` | `1,3` | pass |
+| `17070` | `2,3` | pass |
+| `17244` | `1,2` | pass |
+| `17244` | `1,3` | pass |
+
+Final result: **5/5 passed**. Every case was launched from one root task prompt;
+the coordinator autonomously spawned both feature owners, collected their
+handoffs, integrated the changes, ran combined-tree verification, and completed
+only after the dependency, co-domain, and testing gates were satisfied.
