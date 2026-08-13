@@ -68,6 +68,23 @@ $ python -m pytest tests/test_termui.py -q
   await writeFile(join(integration, "src/click/termui.py"), "def edit(): pass\n");
   await writeFile(join(integration, "src/click/_termui_impl.py"), "class Editor: pass\n");
   await engine.recordCoDomainVerification(workspace, {
+    command: `cd ${join(workspace, "peer_a")} && python -m pytest tests/test_termui.py -q`,
+    exitCode: 0, projectId: "click-compose", runId: "run-1", coordinator: true,
+  });
+  const peerOnly = (await engine.load("codomain")).items.find((item) => item.id === contract.id);
+  if (peerOnly?.status === "verified") {
+    throw new Error("peer-local test incorrectly verified the integration contract");
+  }
+  await engine.recordTestingVerification(workspace, {
+    command: `cd ${join(workspace, "peer_a")} && python -m pytest tests/test_termui.py -q`,
+    exitCode: 0, projectId: "click-compose", runId: "run-1", coordinator: true,
+  });
+  const peerTesting = (await engine.load("testing")).items
+    .filter((item) => item.projectId === "click-compose" && item.runId === "run-1");
+  if (peerTesting.some((item) => item.status === "verified")) {
+    throw new Error("peer-local test incorrectly verified composition testing memory");
+  }
+  await engine.recordCoDomainVerification(workspace, {
     command: "cd " + workspace + " && echo checking && cd integration && python -m pytest tests/test_termui.py -q",
     exitCode: 0, projectId: "click-compose", runId: "run-1",
   });

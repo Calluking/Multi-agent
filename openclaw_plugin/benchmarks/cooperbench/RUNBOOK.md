@@ -128,3 +128,33 @@ Therefore interpret this revision as follows:
 Do not publish the 2/5 versus 2/5 result as evidence that MACP improves or does
 not improve implementation quality. It is a reproducible adapter baseline for
 the next enforcement repair.
+
+## 7. Correctness-gate repair validation
+
+The subsequent adapter revision keeps the commands in section 3 unchanged and
+adds a clean `integration/` checkout. Both producer patches must be composed
+there, every producer-declared command must pass there, and joint tests are
+required when both features alter one API. Peer-local tests cannot verify
+co-domain or composition-testing memory.
+
+The official patch export now represents the mutually accepted integrated
+artifact for both cooperative participants. Raw owner contributions remain as
+`agent<feature>.producer.patch` for attribution and debugging.
+
+Validated smoke run:
+
+```bash
+python3 benchmarks/cooperbench/run_openclaw_macp.py with_plugin \
+  --name macp-fixed-17070-f12 \
+  --repo llama_index_task --task 17070 --features 1,2
+
+cd ~/cooperbench-run/CooperBench
+source .venv/bin/activate
+cooperbench eval -n macp-fixed-17070-f12 \
+  -r llama_index_task -t 17070 -f 1,2 --backend docker
+```
+
+Observed evidence: two submitted producer handoffs; both exact producer suites
+passed with 46 tests in the same integration tree; four focused joint tests
+passed; co-domain and composition-testing records reached `verified`; and the
+native CooperBench evaluator reported **1/1 passed**.

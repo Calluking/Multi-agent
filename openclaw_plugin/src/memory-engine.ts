@@ -623,6 +623,22 @@ export class MemoryEngine {
         .map((match) => `${match[1]}${match[2]}`.trim().replace(/[)\],;:]+$/, ""))
         .filter((command) => command.length > 3 && command.length < 500)))]
       .slice(0, 6);
+    if (this.config.testingEnabled) {
+      const testing = await this.load("testing");
+      for (const handoff of handoffs) {
+        const commands = [...new Set(
+          [...handoff.content.matchAll(/\b(go\s+test|python\s+-m\s+pytest|pytest|npm\s+test|cargo\s+test)\b([^\n`]*)/gi)]
+            .map((match) => `${match[1]}${match[2]}`.trim().replace(/[)\],;:]+$/, ""))
+            .filter((command) => command.length > 3 && command.length < 500),
+        )];
+        for (const item of testing.items.filter((candidate) =>
+          inContext(candidate, projectId, runId)
+          && normalizedSet(candidate.targetRoles).some((role) => sameAssignmentRole(role, handoff.assignment)))) {
+          await this.upsert({ ...item, verificationCommands: commands,
+            text: `${item.text}; Required integration commands=${commands.join(" | ") || "derive producer boundary command"}` });
+        }
+      }
+    }
     const text = [
       `Producer domain=${participants.join(", ")}; Consumer domain=coordinator/integrator`,
       `Shared data=${artifactIds.join(", ") || "public API signatures and runtime behavior declared in peer handoffs"}`,
@@ -667,7 +683,10 @@ export class MemoryEngine {
       const required = item.verificationCommands ?? [];
       if (item.status === "verified") continue;
       const genericTest = /(?:^|&&|;)\s*(?:go\s+test|pytest(?!\s+--version)|python(?:3)?\s+(?:-m\s+pytest(?!\s+--version)|[^;&|\s]+\.py)|node\s+[^;&|\s]+|npm\s+test|cargo\s+test)\b/i.test(command);
-      const integrationTest = (Boolean(input.coordinator) || basename(verificationRoot) === "integration") && genericTest;
+      // Coordinator identity is not evidence of composition. Only commands
+      // whose effective cwd is the dedicated merged tree may verify a
+      // co-domain contract.
+      const integrationTest = basename(verificationRoot) === "integration" && genericTest;
       const matches = required.filter((expected) => {
         const key = canonicalVerificationCommand(expected, workspace);
         return key && (command.includes(key) || key.includes(command)
@@ -683,7 +702,7 @@ export class MemoryEngine {
         .filter((entry) => entry.exists && entry.sha256)
         .map((entry) => [entry.artifactId, entry.sha256 as string]));
       const artifactsPresent = observations.every((entry) => entry.exists && Boolean(entry.sha256));
-      const coordinatorBoundaryPassed = Boolean(input.coordinator && genericTest
+      const coordinatorBoundaryPassed = Boolean(integrationTest
         && input.exitCode === 0 && !reportedTestFailure);
       const attempt: VerificationAttempt = {
         command: input.command, exitCode: input.exitCode,
@@ -817,7 +836,7 @@ export class MemoryEngine {
   }): Promise<number> {
     const verificationRoot = commandWorkspace(input.command, workspace);
     if (!this.config.testingEnabled || !input.projectId || !input.runId
-      || (!input.coordinator && basename(verificationRoot) !== "integration")
+      || basename(verificationRoot) !== "integration"
       || !/(?:^|&&|;)\s*(?:go\s+test|pytest(?!\s+--version)|python(?:3)?\s+(?:-m\s+pytest(?!\s+--version)|[^;&|\s]+\.py)|node\s+[^;&|\s]+|npm\s+test|cargo\s+test)\b/i.test(input.command)) return 0;
     const testing = await this.load("testing");
     let updated = 0;
@@ -830,7 +849,13 @@ export class MemoryEngine {
         .map((entry) => [entry.artifactId, entry.sha256 as string]));
       const reportedTestFailure = /(?:^|\n)(?:FAILED\s|=+\s*FAILURES\s*=+|\d+\s+failed\b)/im
         .test(input.output ?? "");
-      const passed = input.exitCode === 0 && !reportedTestFailure;
+      const required = item.verificationCommands ?? [];
+      const canonical = canonicalVerificationCommand(input.command, workspace);
+      const matched = required.length === 0 || required.some((expected) => {
+        const key = canonicalVerificationCommand(expected, workspace);
+        return key && (canonical.includes(key) || key.includes(canonical));
+      });
+      const passed = matched && input.exitCode === 0 && !reportedTestFailure;
       const attempt: VerificationAttempt = {
         command: input.command, exitCode: input.exitCode, passed, artifactVersions,
         observedAt: new Date().toISOString(), source: input.source ?? "after-tool-call",

@@ -123,3 +123,7 @@ concurrency, and evaluator. The only allowed difference is MACP enablement and
 its documented hook injection.
 
 Historical failed-run notes are not benchmark scores.
+
+The correctness-gate repair and its native-evaluator smoke result are recorded
+in the final section of [`RUNBOOK.md`](RUNBOOK.md). The adapter exports the
+verified integrated artifact while retaining raw producer patches separately.

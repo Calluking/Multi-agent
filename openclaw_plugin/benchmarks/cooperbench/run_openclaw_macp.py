@@ -50,7 +50,9 @@ def feature_text(cb_root: Path, repo: str, task: int, feature: int) -> str:
 def prompt(repo: str, task: int, f1: int, f2: int, spec1: str, spec2: str, workspace: Path) -> str:
     return f"""Run one CooperBench cooperative task with exactly two native OpenClaw child Agents.
 They are peer feature owners, not planner/implementer/reviewer. Spawn both with mode=run.
-Do not implement or edit product code in the coordinator.
+Do not invent product code in the coordinator. The coordinator owns only the
+integration workspace: it must apply both producer patches there, test their
+composition, and ask the responsible producer to repair a failing patch.
 
 [Project cooperbench-{repo}-{task}-features-{f1}-{f2}]
 [Assignment feature-{f1}-owner]
@@ -74,8 +76,13 @@ Each child task must reproduce the complete Project and both Assignment blocks. 
 - write PATCH_READY.md containing changed files/API, exact test command, exit status/result, and compatibility commitment.
 
 Wait with bounded exec checks until both PATCH_READY.md files exist. Inspect both packets. If their
-shared contract conflicts, resume the responsible owner for repair and fresh verification. Finish only
-after both repositories contain non-empty product diffs and current executable evidence.
+shared contract conflicts, resume the responsible owner for repair and fresh verification. Then use the
+clean repository at {workspace}/integration: generate each peer diff from its recorded base commit,
+apply both diffs to integration (resolving overlap without dropping either feature), and run every exact
+test command declared in both PATCH_READY.md packets from the integration tree. Add a focused joint test
+when both features change one API. A passing test in peer_feature{f1} or peer_feature{f2} is producer
+evidence only and cannot prove composition. Finish only after both repositories contain non-empty product
+diffs and every producer test passes against the same integration tree with current executable evidence.
 """
 
 
@@ -110,6 +117,9 @@ def main() -> None:
     image = f"akhatua/cooperbench-{args.repo.removesuffix('_task').replace('_', '-')}:task{args.task}"
     for feature in (f1, f2):
         extract_repo(image, workspace / f"peer_feature{feature}")
+    # A third clean checkout is the only workspace from which composition
+    # verification is accepted. It is intentionally not used for patch output.
+    extract_repo(image, workspace / "integration")
     spec1, spec2 = (feature_text(cb, args.repo, args.task, f) for f in (f1, f2))
     task_prompt = prompt(args.repo, args.task, f1, f2, spec1, spec2, workspace)
     (workspace / "TASK.md").write_text(task_prompt)
@@ -146,13 +156,18 @@ def main() -> None:
     log_dir = cb / "logs" / args.name / "coop" / args.repo / str(args.task) / f"f{f1}_f{f2}"
     log_dir.mkdir(parents=True, exist_ok=True)
     agents: dict[str, dict] = {}
+    producer_diffs: dict[int, str] = {}
     for feature in (f1, f2):
         peer = workspace / f"peer_feature{feature}"
         base_sha = (peer / ".cooperbench_base_sha").read_text().strip()
         committed = run(["git", "diff", "--binary", base_sha, "HEAD", "--", "."], peer, 120).stdout
         uncommitted = run(["git", "diff", "--binary", "HEAD", "--", "."], peer, 120).stdout
         diff = committed + uncommitted
-        (log_dir / f"agent{feature}.patch").write_text(diff)
+        producer_diffs[feature] = diff
+        # Preserve the raw owner contribution for trace diagnosis. Official
+        # CooperBench consumes agentN.patch below, which represents the final
+        # mutually accepted integrated artifact.
+        (log_dir / f"agent{feature}.producer.patch").write_text(diff)
         ready = peer / "PATCH_READY.md"
         agents[f"agent{feature}"] = {
             "feature_id": feature,
@@ -160,10 +175,24 @@ def main() -> None:
             "patch_lines": len(diff.splitlines()),
             "error": None if diff.strip() and ready.is_file() else "missing patch or PATCH_READY.md",
         }
+    integration = workspace / "integration"
+    integration_base = (integration / ".cooperbench_base_sha").read_text().strip()
+    integrated = (run(["git", "diff", "--binary", integration_base, "HEAD", "--", "."], integration, 120).stdout
+                  + run(["git", "diff", "--binary", "HEAD", "--", "."], integration, 120).stdout)
+    # CooperBench's cooperative evaluator treats identical patches as the two
+    # peers agreeing on one normalized integrated artifact. Export that final
+    # artifact for both agents; retain *.producer.patch for attribution.
+    if integrated.strip():
+        for feature in (f1, f2):
+            (log_dir / f"agent{feature}.patch").write_text(integrated)
+    else:
+        for feature in (f1, f2):
+            (log_dir / f"agent{feature}.patch").write_text(producer_diffs[feature])
     result = {
         "repo": args.repo, "task_id": args.task, "features": [f1, f2], "setting": "coop",
         "run_name": args.name, "agent_framework": "openclaw_macp", "model": args.model,
         "condition": args.condition, "plugin_enabled": enabled, "root_exit": proc.returncode,
+        "integration_patch_lines": len(integrated.splitlines()),
         "duration_seconds": time.time() - started, "agents": agents,
         "prompt_sha256": hashlib.sha256(task_prompt.encode()).hexdigest(),
         "workspace": str(workspace),
