@@ -18,6 +18,7 @@ experiments/
 contract_extractions/
 memory_batch_*/
 batch_*/
+matrix-*/
 openclaw-workspace-state.json
 .DS_Store
 *.pptx

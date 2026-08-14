@@ -3,11 +3,13 @@ import argparse, hashlib, json, os, re, shutil, subprocess, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+RUN_ROOT = Path(os.environ.get("MAB_RUN_ROOT", HERE)).expanduser().resolve()
 OPENCLAW = os.environ.get("OPENCLAW_BIN") or shutil.which("openclaw")
 if not OPENCLAW:
     local_openclaw = Path.home() / ".local/bin/openclaw"
     OPENCLAW = str(local_openclaw) if local_openclaw.is_file() else "openclaw"
 MODEL = os.environ.get("BENCHMARK_JUDGE_MODEL", os.environ.get("BENCHMARK_MODEL", "deepseek/deepseek-v4-flash"))
+JUDGE_AGENT = os.environ.get("MAB_JUDGE_AGENT")
 JUDGE_TEMPLATE = """
 [Context]
 **Task Description:**
@@ -47,7 +49,7 @@ Based on the criteria, evaluate the code and output the scores for each criterio
     "quality": score
 }}
 """.strip()
-OUT, SUMMARY = HERE / "scores.jsonl", HERE / "score_comparison.json"
+OUT, SUMMARY = RUN_ROOT / "scores.jsonl", RUN_ROOT / "score_comparison.json"
 
 def call(cmd, cwd=HERE, timeout=720):
     return subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, timeout=timeout)
@@ -90,7 +92,7 @@ def prior_scores():
     return rows
 
 def judge(condition, task_id):
-    ws = HERE / condition / f"task_{task_id:02d}"
+    ws = RUN_ROOT / condition / f"task_{task_id:02d}"
     manifest = json.loads((ws / "run_manifest.json").read_text())
     task = (ws / "TASK.md").read_text()
     start = "1. Implementation requirements:\n"
@@ -105,7 +107,7 @@ def judge(condition, task_id):
         attempts += 1
         session = f"fair20-score-{condition}-t{task_id:02d}-{int(time.time())}"
         try:
-            proc = call([OPENCLAW, "agent", "--agent", manifest["agent"], "--session-id", session, "--model", MODEL, "--thinking", "off", "--timeout", "600", "--json", "--message", judge_prompt], cwd=ws, timeout=660)
+            proc = call([OPENCLAW, "agent", "--agent", JUDGE_AGENT or manifest["agent"], "--session-id", session, "--model", MODEL, "--thinking", "off", "--timeout", "600", "--json", "--message", judge_prompt], cwd=ws, timeout=660)
         except subprocess.TimeoutExpired:
             time.sleep(min(180, 30 * attempts)); continue
         stderr = (proc.stderr or "").lower()

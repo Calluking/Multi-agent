@@ -97,6 +97,19 @@ benchmarks/multiagentbench/scores.jsonl
 benchmarks/multiagentbench/score_comparison.json
 ```
 
+For runs split across isolated batch roots, assemble a consolidated directory
+of task symlinks and select it without copying artifacts:
+
+```bash
+export MAB_RUN_ROOT=/absolute/path/to/consolidated-run-root
+export MAB_JUDGE_AGENT=stable-dedicated-judge-agent
+python3 benchmarks/multiagentbench/evaluate.py --tasks 1-20
+```
+
+`MAB_JUDGE_AGENT` avoids coupling evaluation to run-scoped coordinator agents
+whose original workspaces may have been archived. It changes only the agent
+that submits the unchanged judge prompt.
+
 For every requested task, confirm `run_manifest.json` has `root_exit: 0`, the
 `solution.py` artifact flag is true, and both conditions have the same
 `prompt_sha256`. Provider timeouts, gateway/session locks, WSL hangs, and
