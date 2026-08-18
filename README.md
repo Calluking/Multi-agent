@@ -1,72 +1,94 @@
-# Multi-Agent Contract Protocol
+# Universal Multi-Agent Memory
 
-> A memory-backed protocol for reliable multi-agent collaboration.
+A harness-neutral control plane for multi-agent coding workflows. It provides
+three independently switchable mechanisms and an OpenCode adapter layer:
 
-[![License: Mulan PSL 2.0](https://img.shields.io/badge/license-Mulan%20PSL%202.0-2f6fed)](./LICENSE)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178c6)](./openclaw_plugin/package.json)
-[![Tests](https://img.shields.io/badge/plugin%20tests-passing-1b9c78)](./openclaw_plugin/VALIDATION.md)
-[![GitCode](https://img.shields.io/badge/GitCode-repository-111827)](https://gitcode.com/lukchiwang/Multi-Agent_Contract_Protocol)
+- **Dependency memory** maintains a live obligation graph, gates native agent
+  spawning on prerequisites, observes artifacts, and requires current
+  executable evidence before releasing dependents.
+- **Co-Domain memory** negotiates versioned producer/consumer contracts before
+  implementation and verifies the real integration crossing afterward.
+- **Testing-Practice memory** gives each owner a scoped verification standard,
+  preserves failure evidence, and blocks completion until current artifacts
+  pass authoritative checks.
 
-![Multi-Agent Contract Protocol coordinating verified agent handoffs](https://raw.gitcode.com/lukchiwang/Multi-Agent_Contract_Protocol/raw/main/docs/assets/readme/MultiAgentContractProtocol/macp_hero.png)
+The mechanisms contain no benchmark names, golden patches, task IDs, or
+benchmark-specific adapters. The backend state machines in `src/` are separate
+from the harness integration in `adapters/`.
 
-Multi-Agent Contract Protocol (MACP) turns agent memory into an active coordination layer. It tracks prerequisites, shared interface contracts, ownership, and executable evidence across agent handoffs. It is designed to work across CLIs; OpenClaw is the first adapter.
+## Status
 
-## Why MACP?
+This branch is the clean v2 implementation snapshot. OpenCode is the currently
+implemented harness adapter. The backend and protocol are designed so another
+harness can expose the same lifecycle operations without changing mechanism
+semantics.
 
-Ordinary prompt memory can recall facts, but it does not enforce that:
+## Install and verify
 
-- a producer actually wrote its promised artifact;
-- a consumer waits for its prerequisite;
-- peers agree on a shared interface;
-- verification still matches the current artifact version;
-- the coordinator has objective evidence before declaring success.
-
-MACP makes those obligations explicit and enforceable.
-
-## Architecture
-
-![MACP architecture: lifecycle hooks, contract control plane, and typed memory banks](https://raw.gitcode.com/lukchiwang/Multi-Agent_Contract_Protocol/raw/main/docs/assets/readme/MultiAgentContractProtocol/architecture_overview.svg)
-
-The protocol has three independent memory mechanisms:
-
-| Mechanism | Purpose |
-|---|---|
-| Dependency memory | Private prerequisites, ownership, artifact readiness, and recovery |
-| Co-domain contracts | Shared interface semantics, invariants, and boundary evidence |
-| Testing practice | Reusable commands, evidence patterns, and learned verification procedures |
-
-## Enforced handoff
-
-![MACP handoff sequence from spawn to verified completion](https://raw.gitcode.com/lukchiwang/Multi-Agent_Contract_Protocol/raw/main/docs/assets/readme/MultiAgentContractProtocol/handoff_sequence.svg)
-
-The control plane observes the runtime, injects scoped memory, gates unresolved handoffs, invalidates stale evidence, and blocks premature completion.
-
-## Quick start
+Requirements: Node.js 20 or newer and npm.
 
 ```bash
-cd openclaw_plugin
-npm install
+npm ci
 npm test
-npm run build
 ```
 
-See the [plugin README](./openclaw_plugin/README.md) for configuration and OpenClaw integration.
+`npm test` builds the TypeScript backends and runs the backend plus adapter
+conformance suite.
 
-## Examples and validation
+## OpenCode setup
 
-- [Sequential planner → implementer → reviewer workflow](./openclaw_plugin/examples/sequential-workflow.md)
-- [Cooperative peer → integration workflow](./openclaw_plugin/examples/cooperative-workflow.md)
-- [Memory toggle configurations](./openclaw_plugin/examples/configurations.json)
-- [Validation results and reproduction commands](./openclaw_plugin/VALIDATION.md)
-- [Release roadmap](./openclaw_plugin/ROADMAP.md)
+Add the three local adapters to a workspace `.opencode/opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [
+    "file:///absolute/path/adapters/opencode/dependency-memory-v2.mjs",
+    "file:///absolute/path/adapters/opencode/codomain-memory.mjs",
+    "file:///absolute/path/adapters/opencode/testing-practice-memory.mjs"
+  ]
+}
+```
+
+Copy `skills/multi-agent-memory/SKILL.md` to the harness skill directory, then
+start a task with one additional line:
+
+```text
+Use $multi-agent-memory to complete this task.
+```
+
+Select mechanisms outside the task prompt:
+
+```bash
+MAM_MECHANISMS=all
+MAM_MECHANISMS=dependency
+MAM_MECHANISMS=codomain
+MAM_MECHANISMS=testing
+MAM_MECHANISMS=none
+```
+
+Comma-separated combinations are also supported. Disabled mechanisms do not
+read stale state, inject guidance, or enforce gates.
 
 ## Repository layout
 
-- `openclaw_plugin/`: MACP implementation, adapter, tests, docs, and visuals.
-- `experiments/`: benchmark harnesses and raw evaluation runs.
-- `desgin/`: project progress and final validation notes.
-- `baseline/`, `dependency_memory/`, and `tests/`: original research and comparison infrastructure.
+- `src/` — harness-neutral TypeScript memory banks and state transitions
+- `adapters/opencode/` — OpenCode tools and lifecycle hooks
+- `skills/multi-agent-memory/` — single-line activation workflow
+- `design/` — normative mechanism and implementation specifications
+- `test/` — backend, adapter, toggle, and protocol conformance tests
+
+Start with [SYNCHRONIZED_STATE.md](design/SYNCHRONIZED_STATE.md), then read the
+mechanism-specific design and implementation documents.
+
+## Experimental discipline
+
+Task quality and mechanism conformance are separate outcomes. A generated
+solution may fail a benchmark even when spawning, negotiation, evidence, and
+completion gates behave correctly. Comparisons should use matched prompts with
+only the activation line added and should record resolved switches, model,
+harness version, prompt hash, and implementation revision.
 
 ## License
 
-Licensed under the [Mulan Permissive Software License, Version 2](./LICENSE).
+Licensed under the [Mulan Permissive Software License, Version 2](LICENSE).
